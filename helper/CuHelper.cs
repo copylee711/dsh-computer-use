@@ -251,6 +251,8 @@ namespace DshComputerUse
                 case "displays": return Screen2.Displays();
                 case "screenshot": return Screen2.Capture(r);
                 case "settle": return Screen2.Settle(r);
+                case "shot_mark": Screen2.Mark(r); return null;
+                case "shot_diff": return Screen2.Diff(r);
                 case "cursor": { Native.POINT p; Native.GetCursorPos(out p); return Pt(p.X, p.Y); }
                 case "move": Overlay.Dodge(Args.Int(r, "x", 0), Args.Int(r, "y", 0)); Input.Move(Args.Int(r, "x", 0), Args.Int(r, "y", 0)); return null;
                 case "click": return Input.Click(r);
@@ -269,7 +271,8 @@ namespace DshComputerUse
                 case "apps": return Apps.Search(Args.Str(r, "query", ""), Args.Int(r, "limit", 8));
                 case "launch": return Apps.Launch(r);
                 case "clipboard_get": { var d = new Dictionary<string, object>(); d["text"] = Clip.Get(); return d; }
-                case "clipboard_set": Clip.Set(Args.Str(r, "text", "")); return null;
+                case "clipboard_set": if (Args.Bool(r, "agent", false)) Clip.AgentSet(Args.Str(r, "text", "")); else Clip.Set(Args.Str(r, "text", ""), false); return null;
+                case "clipboard_restore": { var d = new Dictionary<string, object>(); d["restored"] = Clip.RestoreAgent(); return d; }
                 case "ui": return Uia.Elements(r);
                 case "overlay_show": Overlay.ExcludeFromCapture = Args.Bool(r, "excludeFromCapture", true); Overlay.Show(r); return null;
                 case "overlay_pause": Overlay.SetPaused(Args.Bool(r, "paused", false)); return null;
@@ -340,6 +343,28 @@ namespace DshComputerUse
                 }
                 finally { bmp.UnlockBits(data); }
             }
+        }
+
+        static byte[] marked;
+        static string markedRect;
+
+        static string RectKey(int x, int y, int w, int h) { return x + "," + y + "," + w + "," + h; }
+
+        /** Remember what the screen looked like when the model was last shown it. */
+        public static void Mark(Dictionary<string, object> r)
+        {
+            int x = Args.Int(r, "x", 0), y = Args.Int(r, "y", 0), w = Args.Int(r, "width", 0), h = Args.Int(r, "height", 0);
+            marked = Sample(x, y, w, h);
+            markedRect = RectKey(x, y, w, h);
+        }
+
+        /** Fraction of sampled pixels changed since Mark (-1 when there is nothing comparable). */
+        public static Dictionary<string, object> Diff(Dictionary<string, object> r)
+        {
+            int x = Args.Int(r, "x", 0), y = Args.Int(r, "y", 0), w = Args.Int(r, "width", 0), h = Args.Int(r, "height", 0);
+            var d = new Dictionary<string, object>();
+            d["diff"] = marked == null || markedRect != RectKey(x, y, w, h) ? -1.0 : Changed(marked, Sample(x, y, w, h));
+            return d;
         }
 
         static double Changed(byte[] a, byte[] b)
@@ -616,15 +641,16 @@ namespace DshComputerUse
 
         public static object Paste(string text, bool restore)
         {
-            string previous = null;
-            if (restore) { try { previous = Clip.Get(); } catch (Exception) { } }
-            Clip.Set(text);
+            // Keep every format the user had (images, files, rich text), not just text.
+            DataObject previous = null;
+            if (restore) { try { previous = Clip.Snapshot(); } catch (Exception) { } }
+            Clip.Set(text, true);
             Thread.Sleep(40);
             Send(new List<Native.INPUT> { Key(0x11, false), Key(0x56, false) });
             Thread.Sleep(30);
             Send(new List<Native.INPUT> { Key(0x56, true), Key(0x11, true) });
             Thread.Sleep(250);
-            if (restore && previous != null) { try { Clip.Set(previous); } catch (Exception) { } }
+            if (restore) { try { Clip.Put(previous); } catch (Exception) { } }
             return null;
         }
     }
@@ -641,19 +667,106 @@ namespace DshComputerUse
             throw new Exception("clipboard is busy");
         }
 
-        public static void Set(string text)
+        /** The user's clipboard before the agent first wrote to it, restored when control ends. */
+        static DataObject saved;
+        static bool hasSaved;
+        /** What the agent last put there, to tell whether the user copied something since. */
+        static string agentText;
+
+        static string Normalize(string text)
         {
-            if (!string.IsNullOrEmpty(text)) text = text.Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", "\r\n");
+            return string.IsNullOrEmpty(text) ? "" : text.Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", "\r\n");
+        }
+
+        /** Mark data as transient: clipboard history (Win+V), cloud clipboard and clipboard managers skip it. */
+        static void MarkPrivate(DataObject d)
+        {
+            d.SetData("ExcludeClipboardContentFromMonitorProcessing", false, new MemoryStream(new byte[] { 1, 0, 0, 0 }));
+            d.SetData("CanIncludeInClipboardHistory", false, new MemoryStream(BitConverter.GetBytes(0)));
+            d.SetData("CanUploadToCloudClipboard", false, new MemoryStream(BitConverter.GetBytes(0)));
+        }
+
+        /** Copy every format currently on the clipboard (null when empty). */
+        public static DataObject Snapshot()
+        {
             for (int i = 0; i < 5; i++)
             {
                 try
                 {
-                    if (string.IsNullOrEmpty(text)) Clipboard.Clear(); else Clipboard.SetText(text);
+                    var src = Clipboard.GetDataObject();
+                    if (src == null) return null;
+                    var formats = src.GetFormats(false);
+                    if (formats.Length == 0) return null;
+                    var dst = new DataObject();
+                    foreach (var f in formats)
+                    {
+                        if (f == "CanIncludeInClipboardHistory" || f == "CanUploadToCloudClipboard" || f == "ExcludeClipboardContentFromMonitorProcessing") continue;
+                        try { var v = src.GetData(f, false); if (v != null) dst.SetData(f, false, v); } catch (Exception) { }
+                    }
+                    return dst;
+                }
+                catch (ExternalException) { Thread.Sleep(50); }
+            }
+            throw new Exception("clipboard is busy");
+        }
+
+        /** Put a snapshot back without adding a history entry (null clears). */
+        public static void Put(DataObject data)
+        {
+            for (int i = 0; i < 5; i++)
+            {
+                try
+                {
+                    if (data == null) Clipboard.Clear();
+                    else { MarkPrivate(data); Clipboard.SetDataObject(data, true); }
                     return;
                 }
                 catch (ExternalException) { Thread.Sleep(50); }
             }
             throw new Exception("clipboard is busy");
+        }
+
+        public static void Set(string text, bool isPrivate)
+        {
+            text = Normalize(text);
+            for (int i = 0; i < 5; i++)
+            {
+                try
+                {
+                    if (text.Length == 0) Clipboard.Clear();
+                    else
+                    {
+                        var d = new DataObject();
+                        d.SetData(DataFormats.UnicodeText, false, text);
+                        if (isPrivate) MarkPrivate(d);
+                        Clipboard.SetDataObject(d, true);
+                    }
+                    return;
+                }
+                catch (ExternalException) { Thread.Sleep(50); }
+            }
+            throw new Exception("clipboard is busy");
+        }
+
+        /** The agent writes the clipboard: remember the user's content first (once per control session). */
+        public static void AgentSet(string text)
+        {
+            if (!hasSaved) { saved = Snapshot(); hasSaved = true; }
+            Set(text, true);
+            agentText = Normalize(text);
+        }
+
+        /** Control ended: put the user's clipboard back, unless they copied something since the agent's last write. */
+        public static bool RestoreAgent()
+        {
+            if (!hasSaved) return false;
+            bool ours = false;
+            try { ours = Get() == agentText; } catch (Exception) { }
+            var data = saved;
+            saved = null; hasSaved = false; agentText = null;
+            if (!ours) return false;
+            Put(data);
+            return true;
         }
     }
 

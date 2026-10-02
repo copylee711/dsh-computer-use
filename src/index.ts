@@ -188,6 +188,10 @@ export function apply(ctx: Context, config: Config = {}): void {
   // Hide the overlay when the controlling agent stops running.
   ctx.on('agent/status', ({ agent, status }) => {
     if (status === 'running') computer.resetLook()
+    if (status === 'idle' && computer.clipboardAgent === (agent as unknown)) {
+      computer.clipboardAgent = undefined
+      void helper.call('clipboard_restore').catch(() => {})
+    }
     if (status === 'idle' && overlay.controller === (agent as unknown)) void overlay.end(agent as unknown as CancellableAgent)
   })
   ctx.on('agent/disposed', ({ agent }) => {

@@ -95,6 +95,12 @@ const INPUT = new Set<Action>([...MUTATING].filter(action => action !== 'mouse_m
 /** Actions whose input goes to the foreground window. */
 const KEYBOARD = new Set<Action>(['type', 'key', 'hold_key'])
 
+/** Below this fraction of changed sample pixels, the screen counts as unchanged. */
+const UNCHANGED_DIFF = 0.0005
+
+/** Text returned instead of an identical screenshot. */
+export const UNCHANGED_TEXT = 'The screen looks exactly as in your previous screenshot: the action had no visible effect.'
+
 /** Longest adaptive wait for the screen to settle after an action. */
 export const MAX_SETTLE_MS = 2500
 
@@ -102,6 +108,8 @@ export class Computer {
   private displays: Display[] = []
   private displayIndex = -1
   private heldButton = false
+  /** The agent that last wrote the clipboard; when it goes idle the user's clipboard comes back. */
+  clipboardAgent: CancellableAgent | undefined
 
   constructor(
     readonly helper: HelperLike,
@@ -164,8 +172,28 @@ export class Computer {
     const display = await this.display()
     const size = this.shotSize(display)
     const shot = await this.capture(display, size)
+    await this.helper.call('shot_mark', this.rect(display)).catch(() => {})
     await this.remember()
     return shot
+  }
+
+  private rect(display: Display): { x: number; y: number; width: number; height: number } {
+    return { x: display.x, y: display.y, width: display.width, height: display.height }
+  }
+
+  /**
+   * A fresh screenshot, or 'unchanged' when the screen looks the same as in
+   * the last one the model saw (saves an image and tells it the action had no
+   * visible effect).
+   */
+  async freshShot(): Promise<Shot | 'unchanged'> {
+    const display = await this.display()
+    const result = await this.helper.call<{ diff: number } | null>('shot_diff', this.rect(display)).catch(() => null)
+    if (result && result.diff >= 0 && result.diff < UNCHANGED_DIFF) {
+      await this.remember()
+      return 'unchanged'
+    }
+    return this.screenshot()
   }
 
   /** The foreground window as of the model's latest look at the screen. */
@@ -435,13 +463,13 @@ export class Computer {
    * (vision models only). A wait already waited, so it is captured at once:
    * "wait, then look" should be one step, not two.
    */
-  async after(inputs: readonly ActionInput[], call: CallContext): Promise<Shot | undefined> {
+  async after(inputs: readonly ActionInput[], call: CallContext): Promise<Shot | 'unchanged' | undefined> {
     const s = this.settings()
     if (!s.autoScreenshot || !call.vision) return undefined
     const mutating = inputs.some(input => MUTATING.has(input.action))
     if (!mutating && !inputs.some(input => input.action === 'wait')) return undefined
     if (mutating) await this.settle(call.signal)
-    return this.screenshot()
+    return this.freshShot()
   }
 
   // ------------------------------------------------------------- windows

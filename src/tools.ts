@@ -6,7 +6,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { defineTool, type ToolCallView } from '@deepseek-ai/dsh-tools'
 import { appMatches, isHostWindow, normalizeApp } from './access.js'
-import { ACTIONS, Computer, type ActionInput, type CallContext, type Shot, type WindowInfo } from './computer.js'
+import { ACTIONS, Computer, UNCHANGED_TEXT, type ActionInput, type CallContext, type Shot, type WindowInfo } from './computer.js'
 
 type ToolDefinition = ReturnType<typeof defineTool>
 
@@ -51,8 +51,10 @@ function toJson(ref: ImageAttachmentRef): AttachmentJson {
   }
 }
 
-async function withShot(host: ToolHost, text: string, shot: Shot | undefined, call: CallContext): Promise<Value> {
+async function withShot(host: ToolHost, text: string, shot: Shot | 'unchanged' | undefined, call: CallContext): Promise<Value> {
   if (shot === undefined) return { text }
+  if (shot === 'unchanged') return { text: `${text}
+${UNCHANGED_TEXT}` }
   if (!call.vision) return { text: `${text}\n(The current model cannot view images; use ui_elements to read the screen.)` }
   const ref = await host.saveImage(shot, 'screenshot.jpg')
   return { text: `${text}\nScreenshot ${shot.width}x${shot.height} attached; use its pixel coordinates for the next actions.`, image: toJson(ref) }
@@ -149,7 +151,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       }
       const done = lines.join('\n')
       const shot = call.vision && computer.settings().autoScreenshot
-        ? await computer.settle(call.signal).then(() => computer.screenshot())
+        ? await computer.settle(call.signal).then(() => computer.freshShot())
         : undefined
       const summary = failure === undefined
         ? `All ${actions.length} actions done.\n${done}`
@@ -286,16 +288,17 @@ export function createTools(host: ToolHost): ToolDefinition[] {
 
   tools.push(defineTool({
     name: 'clipboard',
-    description: 'Read or write the clipboard text.',
+    description: 'Read or write the clipboard text. Writes stay out of Windows clipboard history, and the user clipboard is restored when you finish. To enter long text, prefer computer type (it pastes for you); never set the clipboard from a shell.',
     parameters: {
       action: { type: 'string', enum: ['read', 'write'], required: true },
       text: { type: 'string', description: 'Text to write.' },
     },
     output,
-    async execute(args): Promise<Value> {
+    async execute(args, exec): Promise<Value> {
       const { action, text } = args as { action: 'read' | 'write'; text?: string }
       if (action === 'write') {
-        await computer.helper.call('clipboard_set', { text: text ?? '' })
+        computer.clipboardAgent = (await host.context(exec)).agent
+        await computer.helper.call('clipboard_set', { text: text ?? '', agent: true })
         return { text: `Clipboard set (${(text ?? '').length} characters).` }
       }
       const result = await computer.helper.call<{ text: string }>('clipboard_get')

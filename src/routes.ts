@@ -7,9 +7,12 @@ import { screenshotSize, type Display } from './coords.js'
 import type { Settings } from './computer.js'
 import type { HelperLike } from './helper-client.js'
 import type { OverlayController } from './overlay.js'
+import type { ScreenshotCache } from './screenshots.js'
 
 export const STATUS_ROUTE = '/api/dsh-computer-use/status'
 export const PREVIEW_ROUTE = '/api/dsh-computer-use/preview'
+export const SCREENSHOTS_ROUTE = '/api/dsh-computer-use/screenshots'
+export const SCREENSHOTS_CLEAN_ROUTE = '/api/dsh-computer-use/screenshots/clean'
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<void>
 
@@ -56,5 +59,29 @@ export function previewRoute(helper: HelperLike, settings: () => Settings, overl
     })
     setTimeout(() => { if (overlay.controller === undefined) void helper.call('overlay_hide').catch(() => {}) }, 3000).unref()
     json(res, 200, { ok: true })
+  }
+}
+
+/** Screenshot cache size and how much of it is orphaned. */
+export function screenshotsRoute(cache: ScreenshotCache): Handler {
+  return async (_req, res) => {
+    try {
+      json(res, 200, { ok: true, ...await cache.stats() })
+    } catch (error) {
+      json(res, 200, { ok: false, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+}
+
+/** Delete orphaned screenshots now. */
+export function screenshotsCleanRoute(cache: ScreenshotCache): Handler {
+  return async (req, res) => {
+    if (req.method !== 'POST') { json(res, 405, { ok: false, error: 'POST only' }); return }
+    try {
+      const result = await cache.clean()
+      json(res, 200, { ok: true, ...result, ...await cache.stats() })
+    } catch (error) {
+      json(res, 200, { ok: false, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 }

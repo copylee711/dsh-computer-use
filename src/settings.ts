@@ -17,7 +17,7 @@ export const DEFAULTS: Settings = {
   settleMs: 400,
   maxLongEdge: 1366,
   maxPixels: 1_150_000,
-  jpegQuality: 80,
+  jpegQuality: 70,
   blockedApps: [],
   pauseOnUserInput: true,
   userIdleMs: 1500,

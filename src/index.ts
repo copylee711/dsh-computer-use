@@ -17,7 +17,8 @@ import { HelperClient, helperAssetPath } from './helper-client.js'
 import { OverlayController, type CancellableAgent, type HostWindowMode } from './overlay.js'
 import { promptText } from './prompt.js'
 import { resolveConfig } from './settings.js'
-import { PREVIEW_ROUTE, STATUS_ROUTE, previewRoute, statusRoute } from './routes.js'
+import { PREVIEW_ROUTE, SCREENSHOTS_CLEAN_ROUTE, SCREENSHOTS_ROUTE, STATUS_ROUTE, previewRoute, screenshotsCleanRoute, screenshotsRoute, statusRoute } from './routes.js'
+import { ScreenshotCache } from './screenshots.js'
 import { createTools } from './tools.js'
 
 export { DEFAULTS, ENTRY_ID, resolveConfig } from './settings.js'
@@ -83,7 +84,7 @@ export const Config: z<Config> = z.object({
     'zh-CN': { $description: '截图总像素上限' },
     'en-US': { $description: 'Screenshot total pixel limit' },
   }),
-  jpegQuality: z.natural().min(30).max(100).default(80).volatile().i18n({
+  jpegQuality: z.natural().min(30).max(100).default(70).volatile().i18n({
     'zh-CN': { $description: '截图 JPEG 质量' },
     'en-US': { $description: 'Screenshot JPEG quality' },
   }),
@@ -146,9 +147,24 @@ export function apply(ctx: Context, config: Config = {}): void {
   }
 
   const attachments = (): AttachmentStore => ctx.attachments as AttachmentStore
+
+  // Orphaned screenshots (their session was deleted) are removed shortly after
+  // start-up and twice a day; referenced ones are never touched.
+  const screenshots = new ScreenshotCache(undefined, undefined, log)
+  ctx.effect(() => {
+    const sweep = (): void => { void screenshots.clean().catch(error => log(`screenshot cleanup skipped: ${String(error)}`)) }
+    const first = setTimeout(sweep, 2 * 60_000)
+    const every = setInterval(sweep, 12 * 60 * 60_000)
+    first.unref(); every.unref()
+    return () => { clearTimeout(first); clearInterval(every) }
+  }, 'computer-use: screenshot cleanup')
   const tools = createTools({
     computer,
-    saveImage: (shot, fileName) => attachments().saveImage({ data: shot.data, mediaType: 'image/jpeg', name: fileName }),
+    async saveImage(shot, fileName) {
+      const ref = await attachments().saveImage({ data: shot.data, mediaType: 'image/jpeg', name: fileName })
+      screenshots.record(String(ref.attachmentId))
+      return ref
+    },
     async context(raw): Promise<CallContext> {
       const exec = raw as ExecLike
       return {
@@ -216,6 +232,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
     route(STATUS_ROUTE, statusRoute(helper, settings, overlay))
     route(PREVIEW_ROUTE, previewRoute(helper, settings, overlay, iconPath))
+    route(SCREENSHOTS_ROUTE, screenshotsRoute(screenshots))
+    route(SCREENSHOTS_CLEAN_ROUTE, screenshotsCleanRoute(screenshots))
   })
 
   ctx.inject(['systemPrompt'], (promptCtx: Context) => {

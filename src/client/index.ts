@@ -12,6 +12,12 @@ import { registerNavIcon } from './nav-icon.js'
 import { Select, selectCss } from './select.js'
 
 const STATUS_ROUTE = '/api/dsh-computer-use/status'
+const SCREENSHOTS_ROUTE = '/api/dsh-computer-use/screenshots'
+const SCREENSHOTS_CLEAN_ROUTE = '/api/dsh-computer-use/screenshots/clean'
+
+interface CacheStats { ok: boolean; error?: string; count: number; bytes: number; orphans: number; orphanBytes: number; removed?: number }
+
+const mb = (bytes: number) => `${(bytes / 1048576).toFixed(1)} MB`
 const PREVIEW_ROUTE = '/api/dsh-computer-use/preview'
 
 type RemoteResult<T> = { ok: true; value: T } | { ok: false; error: { code?: string; message: string } }
@@ -167,6 +173,9 @@ function ComputerUseSection({ ctx }: { ctx: ClientContext }) {
   const [saving, setSaving] = React.useState(false)
   const [message, setMessage] = React.useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
   const [status, setStatus] = React.useState<Status | null>(null)
+  const [cache, setCache] = React.useState<CacheStats | null>(null)
+  const [cacheBusy, setCacheBusy] = React.useState(false)
+  const [cacheNote, setCacheNote] = React.useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
   const dirtyRef = React.useRef(false)
   dirtyRef.current = dirty
 
@@ -194,9 +203,38 @@ function ComputerUseSection({ ctx }: { ctx: ClientContext }) {
     }
   }, [])
 
+  const refreshCache = React.useCallback(async () => {
+    setCacheBusy(true)
+    try {
+      const response = await fetch(SCREENSHOTS_ROUTE, { credentials: 'same-origin' })
+      setCache(await response.json() as CacheStats)
+    } catch {
+      setCache(null)
+    } finally {
+      setCacheBusy(false)
+    }
+  }, [])
+
+  const cleanCache = async () => {
+    setCacheBusy(true)
+    setCacheNote(null)
+    try {
+      const response = await fetch(SCREENSHOTS_CLEAN_ROUTE, { method: 'POST', credentials: 'same-origin' })
+      const result = await response.json() as CacheStats & { bytes: number }
+      if (!result.ok) throw new Error(result.error ?? '清理失败')
+      setCacheNote({ kind: 'ok', text: result.removed ? `已清理 ${result.removed} 张截图` : '没有可清理的截图' })
+      await refreshCache()
+    } catch (error) {
+      setCacheNote({ kind: 'error', text: `清理失败：${(error as Error).message}` })
+    } finally {
+      setCacheBusy(false)
+    }
+  }
+
   React.useEffect(() => {
     void load(true)
     void refreshStatus()
+    void refreshCache()
     return ctx.remote.$on?.('settings/document-updated', (ns: unknown) => { if (ns === ENTRY_ID) { void load(false); void refreshStatus() } }) ?? undefined
   }, [ctx, load, refreshStatus])
 
@@ -333,6 +371,24 @@ function ComputerUseSection({ ctx }: { ctx: ClientContext }) {
         h(NumberField, { label: 'JPEG 质量', unit: '30–100', value: draft.jpegQuality, error: errors.jpegQuality, disabled, onChange: value => edit('jpegQuality', value) }),
       ),
       h('p', { style: S.hint }, '截图越大越清晰、点得越准，但每张图消耗的 token 也越多。默认值（最长边 1366、1.15 百万像素）适合大多数模型。'),
+    ),
+
+    // Screenshot cache
+    h('section', { style: S.card },
+      h('h3', { style: S.cardTitle }, '截图缓存'),
+      h('p', { style: S.hint },
+        cache === null ? (cacheBusy ? '正在统计…' : '无法统计截图缓存。')
+          : !cache.ok ? `统计失败：${cache.error ?? ''}`
+          : `本插件的截图共 ${cache.count} 张，占用 ${mb(cache.bytes)}；其中 ${cache.orphans} 张（${mb(cache.orphanBytes)}）所属会话已删除，可以安全清理。`),
+      h('p', { style: S.hint }, '截图作为附件保存在会话历史里。仍在会话中的截图不会被删除：删除后继续那个会话会直接报错。删除会话后，它留下的截图会在启动 DeepSeek Harness 几分钟后及之后每 12 小时自动清理，也可以在这里立即清理。'),
+      h('div', { style: S.actions },
+        h('button', {
+          type: 'button', style: { ...S.secondary, opacity: cacheBusy || !cache?.orphans ? 0.5 : 1 },
+          disabled: cacheBusy || !cache?.orphans, onClick: () => { void cleanCache() },
+        }, '清理已删除会话的截图'),
+        h('button', { type: 'button', style: S.secondary, disabled: cacheBusy, onClick: () => { void refreshCache() } }, cacheBusy ? '统计中…' : '重新统计'),
+        cacheNote === null ? null : h('span', { style: cacheNote.kind === 'ok' ? S.ok : S.error }, cacheNote.text),
+      ),
     ),
 
     h('div', { style: S.actions },

@@ -12,7 +12,7 @@ import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from './system-prompt-service.js'
 import { AccessControl, normalizeApp, type AccessMode } from './access.js'
-import { Computer, type CallContext, type Settings } from './computer.js'
+import { Computer, type CallContext, type Settings, type TypingMode } from './computer.js'
 import { HelperClient, helperAssetPath } from './helper-client.js'
 import { OverlayController, type CancellableAgent, type HostWindowMode } from './overlay.js'
 import { promptText } from './prompt.js'
@@ -41,6 +41,7 @@ export interface Config {
   blockedApps?: string[]
   pauseOnUserInput?: boolean
   userIdleMs?: number
+  typingMode?: TypingMode
 }
 
 
@@ -67,6 +68,14 @@ export const Config: z<Config> = z.object({
   ]).default('card').volatile().i18n({
     'zh-CN': { $description: '操控期间 DeepSeek Harness 窗口怎么摆放（结束后自动恢复原尺寸和位置）' },
     'en-US': { $description: 'What to do with the DeepSeek Harness window while controlling (restored afterwards)' },
+  }),
+  typingMode: z.union([
+    z.const('stream').i18n({ 'zh-CN': { $description: '流式：长文本按段落逐段粘贴，看得到一段段出现（推荐）' }, 'en-US': { $description: 'Stream: paste long text paragraph by paragraph (recommended)' } }),
+    z.const('type').i18n({ 'zh-CN': { $description: '逐字输入：像人打字，慢；Markdown 编辑器里可能被自动格式化打乱' }, 'en-US': { $description: 'Type key by key: like a person, slow; Markdown editors may auto-format it' } }),
+    z.const('paste').i18n({ 'zh-CN': { $description: '一次粘贴：最快' }, 'en-US': { $description: 'Paste at once: fastest' } }),
+  ]).default('stream').volatile().i18n({
+    'zh-CN': { $description: '文字输入方式' },
+    'en-US': { $description: 'How text is entered' },
   }),
   autoScreenshot: z.boolean().default(true).volatile().i18n({
     'zh-CN': { $description: '每次操作后自动回传截图（省去一轮调用）' },

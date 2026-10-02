@@ -8,6 +8,7 @@ import { isHostWindow, isTransientShell, type AccessControl, type AccessMode, ty
 import { contains, regionToPhysical, screenshotSize, toPhysical, toScreenshot, type Display, type Point, type Size } from './coords.js'
 import type { HelperLike } from './helper-client.js'
 import { parseKeys, parseModifiers } from './keys.js'
+import { splitBlocks, typingPieces } from './text.js'
 import type { CancellableAgent, HostWindowMode, OverlayController } from './overlay.js'
 
 export interface Settings {
@@ -25,7 +26,16 @@ export interface Settings {
   pauseOnUserInput: boolean
   /** How long the keyboard must be quiet before resuming. */
   userIdleMs: number
+  /** How text is entered: stream = paste block by block, type = key by key, paste = at once. */
+  typingMode: TypingMode
 }
+
+export type TypingMode = 'stream' | 'type' | 'paste'
+
+/** Visible typing pace (ms per character). */
+const CHAR_DELAY_MS = 12
+/** Text longer than this is pasted (stream / paste modes). */
+const PASTE_OVER = 200
 
 export interface WindowInfo extends WindowLike {
   hwnd: number
@@ -442,10 +452,7 @@ export class Computer {
         const text = input.text ?? ''
         if (text === '') throw new Error('type needs text.')
         await this.checkKeyboard(call, 'type into')
-        // Long text goes through the clipboard: faster and immune to autocomplete races.
-        if (text.length > 200) await this.helper.call('paste', { text, restore: true })
-        else await this.helper.call('type', { text }, 60_000)
-        return { text: `Typed ${text.length} characters.` }
+        return { text: await this.enterText(text, call) }
       }
       case 'key': {
         const combos = parseKeys(input.text ?? '')
@@ -460,6 +467,53 @@ export class Computer {
         await this.helper.call('keys', { combos, holdMs: Math.round(seconds * 1000) }, 20_000)
         return { text: `Held ${input.text} for ${seconds}s.` }
       }
+    }
+  }
+
+  /**
+   * Enter text the way the settings ask. Long text is pasted (literally: typing
+   * Markdown key by key trips editors' auto-formatting); in stream mode block
+   * by block so the user watches it appear. Between pieces the user can pause
+   * (Esc / typing); if another window comes to the front meanwhile, stop.
+   */
+  private async enterText(text: string, call: CallContext): Promise<string> {
+    const mode = this.settings().typingMode
+    if (mode === 'paste' && text.length > PASTE_OVER) {
+      await this.helper.call('paste', { text, restore: true })
+      return `Typed ${text.length} characters (pasted).`
+    }
+    if (mode === 'stream' && text.length > PASTE_OVER) {
+      const blocks = splitBlocks(text)
+      await this.helper.call('clipboard_hold')
+      try {
+        await this.pieces(blocks, call, async (block, i) => {
+          await this.overlay.status(`输入中 ${i + 1}/${blocks.length}`)
+          await this.helper.call('paste', { text: block, restore: false, waitMs: 220 })
+        })
+      } finally {
+        await this.helper.call('clipboard_release').catch(() => {})
+      }
+      return `Typed ${text.length} characters (streamed in ${blocks.length} blocks).`
+    }
+    const delay = mode === 'paste' ? 0 : CHAR_DELAY_MS
+    await this.pieces(typingPieces(text), call, part => this.helper.call('type', { text: part, charDelay: delay }, 120_000).then(() => {}))
+    return `Typed ${text.length} characters.`
+  }
+
+  /** Run `step` per piece; between pieces yield to the user and make sure the target window is still in front. */
+  private async pieces(items: readonly string[], call: CallContext, step: (item: string, index: number) => Promise<void>): Promise<void> {
+    const target = await this.foreground().catch(() => undefined)
+    let done = 0
+    for (const [index, item] of items.entries()) {
+      if (call.signal.aborted) throw new Error('Cancelled.')
+      if (index > 0 && await this.overlay.yieldToUser(call.signal, this.settings().pauseOnUserInput)) {
+        const now = await this.foreground().catch(() => undefined)
+        if (target && now && now.hwnd !== target.hwnd) {
+          throw new Error(`Stopped after ${done} of ${items.join('').length} characters: the user paused and ${now.exe} is now in front. Check the screen and continue from where the text stops.`)
+        }
+      }
+      await step(item, index)
+      done += item.length
     }
   }
 

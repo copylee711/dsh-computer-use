@@ -53,6 +53,7 @@ interface Draft {
   overlay: boolean
   overlayLabel: string
   hostWindow: Settings['hostWindow']
+  typingMode: Settings['typingMode']
   pauseOnUserInput: boolean
   userIdleMs: string
   autoScreenshot: boolean
@@ -72,6 +73,7 @@ function draftFrom(value: unknown): Draft {
     overlay: s.overlay,
     overlayLabel: s.overlayLabel,
     hostWindow: s.hostWindow,
+    typingMode: s.typingMode,
     pauseOnUserInput: s.pauseOnUserInput,
     userIdleMs: String(s.userIdleMs),
     autoScreenshot: s.autoScreenshot,
@@ -104,6 +106,7 @@ function valuesFrom(d: Draft): Record<string, unknown> {
     overlay: d.overlay,
     overlayLabel: d.overlayLabel.trim() || DEFAULTS.overlayLabel,
     hostWindow: d.hostWindow,
+    typingMode: d.typingMode,
     pauseOnUserInput: d.pauseOnUserInput,
     userIdleMs: Math.round(Number(d.userIdleMs)),
     autoScreenshot: d.autoScreenshot,
@@ -347,6 +350,19 @@ function ComputerUseSection({ ctx }: { ctx: ClientContext }) {
             onChange: (value: string) => edit('hostWindow', value as Settings['hostWindow']),
           }),
           h('span', { style: { ...S.hint, fontWeight: 400 } }, '操控结束后自动恢复原尺寸和位置。'),
+        ),
+        h('div', { style: S.label },
+          '文字输入方式',
+          h(Select, {
+            label: '文字输入方式', disabled, value: draft.typingMode,
+            options: [
+              { value: 'stream', label: '流式：长文本逐段出现（推荐）' },
+              { value: 'type', label: '逐字输入：像人打字，最慢' },
+              { value: 'paste', label: '一次粘贴：最快' },
+            ],
+            onChange: (value: string) => edit('typingMode', value as Settings['typingMode']),
+          }),
+          h('span', { style: { ...S.hint, fontWeight: 400 } }, '短文字都会逐字打出来。长文本逐字输入在 Typora、Obsidian、Word 等编辑器里可能被自动补全括号、自动续列表打乱；流式按段落粘贴，既看得到过程又不会乱。'),
         ),
       ),
     ),

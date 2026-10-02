@@ -7,7 +7,7 @@ import { createTools } from '../src/tools.js'
 
 const SETTINGS: Settings = {
   accessMode: 'per-app', blockedApps: [], overlay: true, overlayLabel: 'DeepSeek Harness', hostWindow: 'keep',
-  maxLongEdge: 1366, maxPixels: 1_150_000, jpegQuality: 80, autoScreenshot: true, settleMs: 0, pauseOnUserInput: true, userIdleMs: 50,
+  maxLongEdge: 1366, maxPixels: 1_150_000, jpegQuality: 80, autoScreenshot: true, settleMs: 0, pauseOnUserInput: true, userIdleMs: 50, typingMode: 'paste',
 }
 const CHROME = { hwnd: 11, exe: 'chrome.exe', title: 'GitHub - Google Chrome', pid: 1, className: 'Chrome_WidgetWin_1', path: '', x: 0, y: 0, width: 2560, height: 1504, minimized: false, maximized: true }
 const HOST = { ...CHROME, hwnd: 22, exe: 'DeepSeek Harness.exe', title: 'chat — DeepSeek Harness' }
@@ -38,10 +38,10 @@ class FakeHelper implements HelperLike {
   dispose(): void {}
 }
 
-function setup(options: { vision?: boolean; mode?: Settings['accessMode'] } = {}) {
+function setup(options: { vision?: boolean; mode?: Settings['accessMode']; typing?: Settings['typingMode'] } = {}) {
   const helper = new FakeHelper()
   const access = new AccessControl()
-  const settings = { ...SETTINGS, accessMode: options.mode ?? 'per-app' }
+  const settings = { ...SETTINGS, accessMode: options.mode ?? 'per-app', typingMode: options.typing ?? SETTINGS.typingMode }
   const overlay = new OverlayController(helper, () => settings, () => {})
   const computer = new Computer(helper, access, overlay, () => settings)
   const saved: number[] = []
@@ -212,6 +212,29 @@ describe('foreground takeover', () => {
 })
 
 describe('fewer round trips', () => {
+  it('streams long text block by block and gives the clipboard back', async () => {
+    const t = setup({ mode: 'allow-all', typing: 'stream' })
+    const paragraph = '这是一段比较长的正文，用来测试流式输入是否按段落粘贴。'.repeat(3)
+    const text = `${paragraph}
+
+${paragraph}
+
+${paragraph}
+`
+    const value = await t.run('computer', { action: 'type', text })
+    expect(value.text).toMatch(/streamed in 3 blocks/)
+    const cmds = t.helper.calls.map(c => c.cmd).filter(c => ['clipboard_hold', 'paste', 'clipboard_release'].includes(c))
+    expect(cmds).toEqual(['clipboard_hold', 'paste', 'paste', 'paste', 'clipboard_release'])
+    expect(t.helper.calls.filter(c => c.cmd === 'paste').map(c => c.args.text).join('')).toBe(text)
+  })
+
+  it('types short text visibly, one character at a time', async () => {
+    const t = setup({ mode: 'allow-all', typing: 'stream' })
+    await t.run('computer', { action: 'type', text: 'github.com' })
+    const call = t.helper.calls.find(c => c.cmd === 'type')!
+    expect(call.args.charDelay).toBeGreaterThan(0)
+  })
+
   it('finds windows by program before matching the DSH chat title', async () => {
     const t = setup({ mode: 'allow-all' })
     t.helper.foreground = CHROME

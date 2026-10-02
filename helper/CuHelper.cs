@@ -266,8 +266,10 @@ namespace DshComputerUse
                 case "scroll": using (new PassThrough()) return Input.Scroll(r);
                 case "keys": return Input.Keys(r);
                 case "key_state": return Input.KeyState(r);
-                case "type": return Input.Type(Args.Str(r, "text", ""), Args.Int(r, "chunkDelay", 8));
-                case "paste": return Input.Paste(Args.Str(r, "text", ""), Args.Bool(r, "restore", true));
+                case "type": return Input.Type(Args.Str(r, "text", ""), Args.Int(r, "chunkDelay", 8), Args.Int(r, "charDelay", 0));
+                case "clipboard_hold": Clip.Hold(); return null;
+                case "clipboard_release": Clip.Release(); return null;
+                case "paste": return Input.Paste(Args.Str(r, "text", ""), Args.Bool(r, "restore", true), Args.Int(r, "waitMs", 250));
                 case "windows": return Windows.List();
                 case "foreground": return Windows.Describe(Native.GetForegroundWindow());
                 case "window_at": return Windows.At(Args.Int(r, "x", 0), Args.Int(r, "y", 0));
@@ -660,10 +662,12 @@ namespace DshComputerUse
             return null;
         }
 
-        public static object Type(string text, int chunkDelay)
+        /** charDelay > 0: one character at a time, like a person typing; otherwise fast batches. */
+        public static object Type(string text, int chunkDelay, int charDelay)
         {
             var batch = new List<Native.INPUT>();
-            Action flush = delegate { Send(batch); batch.Clear(); if (chunkDelay > 0) Thread.Sleep(chunkDelay); };
+            int pause = charDelay > 0 ? charDelay : chunkDelay;
+            Action flush = delegate { if (batch.Count == 0) return; Send(batch); batch.Clear(); if (pause > 0) Thread.Sleep(pause); };
             for (int i = 0; i < text.Length; i++)
             {
                 char c = text[i];
@@ -671,13 +675,14 @@ namespace DshComputerUse
                 if (c == '\n') { flush(); batch.Add(Key(0x0D, false)); batch.Add(Key(0x0D, true)); flush(); continue; }
                 if (c == '\t') { batch.Add(Key(0x09, false)); batch.Add(Key(0x09, true)); continue; }
                 batch.Add(Unicode(c, false)); batch.Add(Unicode(c, true));
-                if (batch.Count >= 40 && !char.IsHighSurrogate(c)) flush();
+                if (char.IsHighSurrogate(c)) continue;
+                if (charDelay > 0 || batch.Count >= 40) flush();
             }
             flush();
             return null;
         }
 
-        public static object Paste(string text, bool restore)
+        public static object Paste(string text, bool restore, int waitMs)
         {
             // Keep every format the user had (images, files, rich text), not just text.
             DataObject previous = null;
@@ -687,7 +692,7 @@ namespace DshComputerUse
             Send(new List<Native.INPUT> { Key(0x11, false), Key(0x56, false) });
             Thread.Sleep(30);
             Send(new List<Native.INPUT> { Key(0x56, true), Key(0x11, true) });
-            Thread.Sleep(250);
+            Thread.Sleep(Math.Max(60, waitMs)); // the app reads the clipboard asynchronously
             if (restore) { try { Clip.Put(previous); } catch (Exception) { } }
             return null;
         }
@@ -762,6 +767,25 @@ namespace DshComputerUse
                 catch (ExternalException) { Thread.Sleep(50); }
             }
             throw new Exception("clipboard is busy");
+        }
+
+        /** The user's clipboard, kept aside while a streamed paste runs. */
+        static DataObject held;
+        static bool holding;
+
+        public static void Hold()
+        {
+            if (holding) return;
+            held = Snapshot();
+            holding = true;
+        }
+
+        public static void Release()
+        {
+            if (!holding) return;
+            var data = held;
+            held = null; holding = false;
+            Put(data);
         }
 
         public static void Set(string text, bool isPrivate)

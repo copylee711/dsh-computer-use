@@ -21,6 +21,7 @@ export const DEFAULTS: Settings = {
   blockedApps: [],
   pauseOnUserInput: true,
   userIdleMs: 1500,
+  typingMode: 'stream',
 }
 
 /** Unwrap `.volatile()` refs (`{ get() }`) and fall back to defaults for bad values. */
@@ -52,6 +53,7 @@ export function resolveConfig(raw: unknown): Settings {
     jpegQuality: num('jpegQuality', 30, 100),
     pauseOnUserInput: bool('pauseOnUserInput'),
     userIdleMs: num('userIdleMs', 300, 10_000),
+    typingMode: out.typingMode === 'stream' || out.typingMode === 'type' || out.typingMode === 'paste' ? out.typingMode : DEFAULTS.typingMode,
     blockedApps: Array.isArray(out.blockedApps) ? out.blockedApps.filter((item): item is string => typeof item === 'string' && item.trim() !== '') : [],
   }
 }

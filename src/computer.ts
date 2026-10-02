@@ -254,6 +254,23 @@ export class Computer {
     if (result?.focused) await sleep(80)
   }
 
+  /** Wait at most `maxMs`, returning once the screen has been still for ~0.8 s. Returns the time waited. */
+  async waitForQuiet(maxMs: number, signal: AbortSignal): Promise<number> {
+    const started = Date.now()
+    if (maxMs <= 600) {
+      await sleep(maxMs, undefined, { signal })
+      return maxMs
+    }
+    const display = await this.display()
+    const result = await this.helper.call<{ ms: number } | null>('settle', {
+      x: display.x, y: display.y, width: display.width, height: display.height,
+      minMs: 300, maxMs, quietMs: 800,
+    }, maxMs + 10_000).catch(() => null)
+    if (result === null) await sleep(Math.max(0, maxMs - (Date.now() - started)), undefined, { signal })
+    if (signal.aborted) throw new Error('Cancelled.')
+    return Date.now() - started
+  }
+
   /** Wait until the screen stops changing (bounded), instead of a fixed delay. */
   async settle(signal: AbortSignal): Promise<void> {
     const s = this.settings()
@@ -376,9 +393,11 @@ export class Computer {
         return { text: `Cursor at (${p.x}, ${p.y})${p.offscreen ? ' — on another display' : ''}.` }
       }
       case 'wait': {
-        const seconds = Math.min(30, Math.max(0, input.duration ?? 1))
-        await sleep(seconds * 1000, undefined, { signal: call.signal })
-        return { text: `Waited ${seconds}s.` }
+        // Up to `duration`, but done as soon as the screen has been still for a
+        // moment: models ask for "wait 3s" after pages that already loaded.
+        const seconds = Math.min(30, Math.max(0, Number(input.duration ?? 1) || 0))
+        const waited = await this.waitForQuiet(seconds * 1000, call.signal)
+        return { text: waited < seconds * 1000 - 200 ? `Waited ${(waited / 1000).toFixed(1)}s (the screen settled early).` : `Waited ${seconds}s.` }
       }
       case 'mouse_move': {
         const p = await this.point(input.coordinate)

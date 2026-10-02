@@ -168,15 +168,11 @@ export class Computer {
     await this.refreshDisplays()
     const display = await this.display()
     const size = this.shotSize(display)
-    const shot = await this.capture(display, size)
-    await this.helper.call('shot_mark', this.rect(display)).catch(() => {})
+    const shot = await this.capture(display, size, { mark: true })
     await this.remember()
-    return shot
+    return shot as Shot
   }
 
-  private rect(display: Display): { x: number; y: number; width: number; height: number } {
-    return { x: display.x, y: display.y, width: display.width, height: display.height }
-  }
 
   /**
    * A fresh screenshot, or 'unchanged' when the screen looks the same as in
@@ -184,13 +180,12 @@ export class Computer {
    * visible effect).
    */
   async freshShot(): Promise<Shot | 'unchanged'> {
+    await this.refreshDisplays()
     const display = await this.display()
-    const result = await this.helper.call<{ diff: number } | null>('shot_diff', this.rect(display)).catch(() => null)
-    if (result && result.diff >= 0 && result.diff < UNCHANGED_DIFF) {
-      await this.remember()
-      return 'unchanged'
-    }
-    return this.screenshot()
+    // One capture: the helper compares it with the last one shown and only encodes it if it differs.
+    const shot = await this.capture(display, this.shotSize(display), { compare: true, threshold: UNCHANGED_DIFF })
+    await this.remember()
+    return shot ?? 'unchanged'
   }
 
   /** The foreground window as of the model's latest look at the screen. */
@@ -218,11 +213,12 @@ export class Computer {
     return now && now.hwnd !== seen.hwnd ? now : undefined
   }
 
-  private async capture(rect: { x: number; y: number; width: number; height: number }, out: Size): Promise<Shot> {
-    const result = await this.helper.call<{ data: string; width: number; height: number }>('screenshot', {
+  private async capture(rect: { x: number; y: number; width: number; height: number }, out: Size, options: { mark?: boolean; compare?: boolean; threshold?: number } = {}): Promise<Shot | undefined> {
+    const result = await this.helper.call<{ data?: string; width: number; height: number; unchanged?: boolean }>('screenshot', {
       x: rect.x, y: rect.y, width: rect.width, height: rect.height,
-      outWidth: out.width, outHeight: out.height, quality: this.settings().jpegQuality,
+      outWidth: out.width, outHeight: out.height, quality: this.settings().jpegQuality, ...options,
     }, 30_000)
+    if (result.unchanged || result.data === undefined) return undefined
     return { data: Buffer.from(result.data, 'base64'), width: result.width, height: result.height }
   }
 
@@ -233,7 +229,7 @@ export class Computer {
     const s = this.settings()
     // Show the region at native resolution, shrunk only to the screenshot limits.
     const out = screenshotSize(rect, { maxLongEdge: s.maxLongEdge, maxPixels: s.maxPixels })
-    return this.capture(rect, out)
+    return (await this.capture(rect, out))!
   }
 
   // ---------------------------------------------------------------- state

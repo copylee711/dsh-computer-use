@@ -136,6 +136,11 @@ namespace DshComputerUse
             object v; if (!d.TryGetValue(k, out v) || v == null) return def;
             return (int)Math.Round(Convert.ToDouble(v));
         }
+        public static double Double(Dictionary<string, object> d, string k, double def)
+        {
+            object v;
+            return d.TryGetValue(k, out v) && v != null ? Convert.ToDouble(v, System.Globalization.CultureInfo.InvariantCulture) : def;
+        }
         public static string Str(Dictionary<string, object> d, string k, string def)
         {
             object v; if (!d.TryGetValue(k, out v) || v == null) return def;
@@ -253,8 +258,6 @@ namespace DshComputerUse
                 case "displays": return Screen2.Displays();
                 case "screenshot": return Screen2.Capture(r);
                 case "settle": return Screen2.Settle(r);
-                case "shot_mark": Screen2.Mark(r); return null;
-                case "shot_diff": return Screen2.Diff(r);
                 case "cursor": { Native.POINT p; Native.GetCursorPos(out p); return Pt(p.X, p.Y); }
                 case "move": using (new PassThrough()) { Overlay.Dodge(Args.Int(r, "x", 0), Args.Int(r, "y", 0)); Input.Move(Args.Int(r, "x", 0), Args.Int(r, "y", 0)); } return null;
                 case "click": using (new PassThrough()) return Input.Click(r);
@@ -318,12 +321,8 @@ namespace DshComputerUse
         }
 
         /** Sample every 8th pixel of a screen rectangle (BGR bytes). */
-        /**
-         * composite: paint what is under the DSH card (exact, slower: used once
-         * per action). Otherwise the card area is blanked so its own updates
-         * (streaming text, timers) never look like screen activity.
-         */
-        static byte[] Sample(int x, int y, int w, int h, bool composite)
+        /** Sample the screen for settle detection; the card area is blanked (no flicker). */
+        static byte[] Sample(int x, int y, int w, int h)
         {
             using (var bmp = new Bitmap(w, h, PixelFormat.Format24bppRgb))
             {
@@ -331,52 +330,40 @@ namespace DshComputerUse
                 {
                     IntPtr dst = g.GetHdc();
                     IntPtr src = Native.GetDC(IntPtr.Zero);
-                    using (composite ? CardLayer.Hide() : null)
-                    {
-                        try { Native.BitBlt(dst, 0, 0, w, h, src, x, y, 0x00CC0020 | 0x40000000); }
-                        finally { Native.ReleaseDC(IntPtr.Zero, src); g.ReleaseHdc(dst); }
-                    }
-                    if (!composite) CardLayer.Blank(g, x, y);
+                    try { Native.BitBlt(dst, 0, 0, w, h, src, x, y, 0x00CC0020 | 0x40000000); }
+                    finally { Native.ReleaseDC(IntPtr.Zero, src); g.ReleaseHdc(dst); }
+                    CardLayer.Blank(g, x, y);
                 }
-                var data = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
-                try
-                {
-                    int sx = (w + 7) / 8, sy = (h + 7) / 8;
-                    var row = new byte[data.Stride];
-                    var outp = new byte[sx * sy * 3];
-                    int k = 0;
-                    for (int j = 0; j < sy; j++)
-                    {
-                        Marshal.Copy(new IntPtr(data.Scan0.ToInt64() + (long)j * 8 * data.Stride), row, 0, data.Stride);
-                        for (int i = 0; i < sx; i++) { int o = i * 8 * 3; outp[k++] = row[o]; outp[k++] = row[o + 1]; outp[k++] = row[o + 2]; }
-                    }
-                    return outp;
-                }
-                finally { bmp.UnlockBits(data); }
+                return SampleBitmap(bmp);
             }
         }
 
+        /** Every 8th pixel of a 24-bit bitmap (BGR bytes). */
+        static byte[] SampleBitmap(Bitmap bmp)
+        {
+            int w = bmp.Width, h = bmp.Height;
+            var data = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+            try
+            {
+                int sx = (w + 7) / 8, sy = (h + 7) / 8;
+                var row = new byte[data.Stride];
+                var outp = new byte[sx * sy * 3];
+                int k = 0;
+                for (int j = 0; j < sy; j++)
+                {
+                    Marshal.Copy(new IntPtr(data.Scan0.ToInt64() + (long)j * 8 * data.Stride), row, 0, data.Stride);
+                    for (int i = 0; i < sx; i++) { int o = i * 8 * 3; outp[k++] = row[o]; outp[k++] = row[o + 1]; outp[k++] = row[o + 2]; }
+                }
+                return outp;
+            }
+            finally { bmp.UnlockBits(data); }
+        }
+
+        /** What the screen looked like in the last screenshot the model was shown. */
         static byte[] marked;
         static string markedRect;
 
         static string RectKey(int x, int y, int w, int h) { return x + "," + y + "," + w + "," + h; }
-
-        /** Remember what the screen looked like when the model was last shown it. */
-        public static void Mark(Dictionary<string, object> r)
-        {
-            int x = Args.Int(r, "x", 0), y = Args.Int(r, "y", 0), w = Args.Int(r, "width", 0), h = Args.Int(r, "height", 0);
-            marked = Sample(x, y, w, h, true);
-            markedRect = RectKey(x, y, w, h);
-        }
-
-        /** Fraction of sampled pixels changed since Mark (-1 when there is nothing comparable). */
-        public static Dictionary<string, object> Diff(Dictionary<string, object> r)
-        {
-            int x = Args.Int(r, "x", 0), y = Args.Int(r, "y", 0), w = Args.Int(r, "width", 0), h = Args.Int(r, "height", 0);
-            var d = new Dictionary<string, object>();
-            d["diff"] = marked == null || markedRect != RectKey(x, y, w, h) ? -1.0 : Changed(marked, Sample(x, y, w, h, true));
-            return d;
-        }
 
         static double Changed(byte[] a, byte[] b)
         {
@@ -397,13 +384,13 @@ namespace DshComputerUse
             int minMs = Args.Int(r, "minMs", 300), maxMs = Args.Int(r, "maxMs", 2500), interval = Args.Int(r, "intervalMs", 120), quietMs = Args.Int(r, "quietMs", 240);
             if (w <= 0 || h <= 0) throw new Exception("invalid settle rect");
             var watch = System.Diagnostics.Stopwatch.StartNew();
-            byte[] prev = Sample(x, y, w, h, false);
+            byte[] prev = Sample(x, y, w, h);
             long quietSince = -1;
             bool stable = false;
             while (true)
             {
                 Thread.Sleep(interval);
-                byte[] cur = Sample(x, y, w, h, false);
+                byte[] cur = Sample(x, y, w, h);
                 long now = watch.ElapsedMilliseconds;
                 if (Changed(prev, cur) < 0.002) { if (quietSince < 0) quietSince = now - interval; }
                 else quietSince = -1;
@@ -431,12 +418,28 @@ namespace DshComputerUse
                 {
                     IntPtr dst = g.GetHdc();
                     IntPtr src = Native.GetDC(IntPtr.Zero);
-                    // The DSH card is for the user only: capture what is under it.
-                    using (CardLayer.Hide())
+                    // The DSH card is for the user only: capture what is under it
+                    // (it blinks out for the duration of this one BitBlt).
+                    using (CardLayer.Hide(new Rectangle(x, y, w, h)))
                     {
                         try { Native.BitBlt(dst, 0, 0, w, h, src, x, y, 0x00CC0020 | 0x40000000); }
                         finally { Native.ReleaseDC(IntPtr.Zero, src); g.ReleaseHdc(dst); }
                     }
+                }
+                // compare: report "unchanged" instead of an identical image; mark: remember for next time.
+                bool compare = Args.Bool(r, "compare", false), mark = Args.Bool(r, "mark", false) || compare;
+                if (mark)
+                {
+                    string key = RectKey(x, y, w, h);
+                    byte[] sample = SampleBitmap(bmp);
+                    if (compare && marked != null && markedRect == key && Changed(marked, sample) < Args.Double(r, "threshold", 0.0005))
+                    {
+                        var same = new Dictionary<string, object>();
+                        same["unchanged"] = true;
+                        return same;
+                    }
+                    marked = sample;
+                    markedRect = key;
                 }
                 Bitmap output = bmp;
                 Bitmap scaled = null;
@@ -842,10 +845,13 @@ namespace DshComputerUse
             g.FillRectangle(Brushes.Black, r.X - ox, r.Y - oy, r.Width, r.Height);
         }
 
-        /** Make the card invisible while a capture runs (dispose to show it again). */
-        public static IDisposable Hide()
+        /** Make the card invisible while a capture of `area` runs (dispose to show it again). */
+        public static IDisposable Hide(Rectangle area)
         {
-            return new Hidden(Live() ? Hwnd : IntPtr.Zero);
+            if (!Live()) return new Hidden(IntPtr.Zero);
+            var r = Frame(Hwnd);
+            r.Inflate(32, 32);
+            return new Hidden(r.IntersectsWith(area) ? Hwnd : IntPtr.Zero);
         }
 
         sealed class Hidden : IDisposable

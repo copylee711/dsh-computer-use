@@ -248,7 +248,7 @@ describe('fewer round trips', () => {
   it('sends text instead of an identical screenshot when nothing changed', async () => {
     const t = setup({ mode: 'allow-all' })
     const original = t.helper.call.bind(t.helper)
-    t.helper.call = async <T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> => cmd === 'shot_diff' ? { diff: 0 } as T : original<T>(cmd, args)
+    t.helper.call = async <T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> => cmd === 'screenshot' && args.compare ? { unchanged: true } as T : original<T>(cmd, args)
     const value = await t.run('computer', { action: 'key', text: 'F5' })
     expect(value.image).toBeUndefined()
     expect(value.text).toMatch(/no visible effect/)

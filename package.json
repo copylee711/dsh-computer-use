@@ -1,6 +1,6 @@
 {
   "name": "@copylee/dsh-computer-use",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "DeepSeek Harness Computer Use 插件（Windows）：让 AI 看屏幕、点鼠标、敲键盘操控电脑；控制时屏幕泛起橙色光晕并显示“DeepSeek Harness 正在操控你的电脑”，按 Esc 暂停 / 继续。",
   "type": "module",
   "author": "copylee",

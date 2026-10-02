@@ -8,6 +8,7 @@
 import * as React from 'react'
 import { DEFAULTS, ENTRY_ID, resolveConfig } from '../settings.js'
 import type { Settings } from '../computer.js'
+import { registerNavIcon } from './nav-icon.js'
 import { Select, selectCss } from './select.js'
 
 const STATUS_ROUTE = '/api/dsh-computer-use/status'
@@ -356,6 +357,7 @@ function ComputerUseSection({ ctx }: { ctx: ClientContext }) {
 export const inject = ['slots', 'remote', 'remote.settings']
 
 export function apply(ctx: ClientContext): void {
+  ctx.effect(() => registerNavIcon('电脑控制'), 'computer-use: settings nav icon')
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: ENTRY_ID,

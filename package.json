@@ -1,6 +1,6 @@
 {
   "name": "@copylee/dsh-computer-use",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DeepSeek Harness Computer Use 插件（Windows）：像 Claude 一样看屏幕、点鼠标、敲键盘操控电脑；控制时屏幕泛起橙色光晕并显示“DeepSeek 正在使用你的电脑”，按 Esc 立即停止。",
   "type": "module",
   "author": "copylee",

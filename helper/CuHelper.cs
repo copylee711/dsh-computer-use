@@ -1121,18 +1121,31 @@ namespace DshComputerUse
             return p;
         }
 
-        static void DrawSpark(Graphics g, float cx, float cy, float radius, Color color, float width)
+        static readonly Color Whale = Color.FromArgb(77, 107, 254); // DeepSeek blue #4D6BFE
+
+        /// A whale facing left, drawn in a 24x24 design box scaled to `size`.
+        static void DrawWhale(Graphics g, float x, float y, float size, Color eye)
         {
-            using (var pen = new Pen(color, width))
+            float k = size / 24f;
+            Func<float, float, PointF> P = delegate (float px, float py) { return new PointF(x + px * k, y + py * k); };
+            using (var path = new GraphicsPath())
+            {
+                path.AddBezier(P(1f, 14f), P(1f, 9f), P(5.5f, 6.5f), P(10f, 7.2f));
+                path.AddBezier(P(10f, 7.2f), P(14f, 7.8f), P(16.5f, 10f), P(18f, 10.5f));
+                path.AddBezier(P(18f, 10.5f), P(19.5f, 9f), P(20f, 6f), P(19.2f, 3.5f));
+                path.AddBezier(P(19.2f, 3.5f), P(21.5f, 4.5f), P(23f, 3.8f), P(23.5f, 2.5f));
+                path.AddBezier(P(23.5f, 2.5f), P(23.8f, 6f), P(22.5f, 9.5f), P(19.5f, 13f));
+                path.AddBezier(P(19.5f, 13f), P(17.5f, 17.5f), P(13f, 19.5f), P(8.5f, 19.3f));
+                path.AddBezier(P(8.5f, 19.3f), P(4f, 19f), P(1f, 17.5f), P(1f, 14f));
+                path.CloseFigure();
+                using (var brush = new SolidBrush(Whale)) g.FillPath(brush, path);
+            }
+            using (var pen = new Pen(Color.FromArgb(150, eye), Math.Max(1f, 1.1f * k)))
             {
                 pen.StartCap = LineCap.Round; pen.EndCap = LineCap.Round;
-                for (int i = 0; i < 6; i++)
-                {
-                    double a = Math.PI * i / 6;
-                    float dx = (float)(Math.Cos(a) * radius), dy = (float)(Math.Sin(a) * radius);
-                    g.DrawLine(pen, cx - dx, cy - dy, cx + dx, cy + dy);
-                }
+                g.DrawBezier(pen, P(2.6f, 15.4f), P(6f, 17.2f), P(10.5f, 17.2f), P(14f, 15.6f)); // belly line
             }
+            using (var brush = new SolidBrush(eye)) g.FillEllipse(brush, x + 4.6f * k, y + 11f * k, 2.2f * k, 2.2f * k);
         }
 
         static void RenderPill()
@@ -1167,7 +1180,7 @@ namespace DshComputerUse
                 SizeF mainSize = mg.MeasureString(main, fMain, 10000, fmt);
                 SizeF subSize = mg.MeasureString(sub, fSub, 10000, fmt);
                 SizeF btnSize = mg.MeasureString("停止", fBtn, 10000, fmt);
-                float pad = 14 * scale, gap = 10 * scale, icon = 18 * scale;
+                float pad = 16 * scale, gap = 11 * scale, icon = 20 * scale;
                 float height = 40 * scale;
                 float btnW = btnSize.Width + 22 * scale, btnH = 26 * scale;
                 float width = pad + icon + gap + mainSize.Width + gap + 1 * scale + gap + subSize.Width + gap + btnW + (pad - 7 * scale);
@@ -1187,8 +1200,7 @@ namespace DshComputerUse
                         using (var brush = new SolidBrush(Color.FromArgb(242, 31, 30, 29))) g.FillPath(brush, path);
                         using (var pen = new Pen(Color.FromArgb(200, Accent), Math.Max(1f, 1.2f * scale))) g.DrawPath(pen, path);
                     }
-                    float cx = pad + icon / 2, cy = H / 2f;
-                    DrawSpark(g, cx, cy, icon / 2, Accent, Math.Max(1.6f, 2.1f * scale));
+                    DrawWhale(g, pad - 5 * scale, (H - icon - 10 * scale) / 2f, icon + 10 * scale, Color.FromArgb(31, 30, 29));
                     float tx = pad + icon + gap;
                     using (var b = new SolidBrush(Color.FromArgb(250, 250, 249))) g.DrawString(main, fMain, b, tx, (H - mainSize.Height) / 2f, fmt);
                     tx += mainSize.Width + gap;

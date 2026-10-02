@@ -7,7 +7,7 @@ import { createTools } from '../src/tools.js'
 
 const SETTINGS: Settings = {
   accessMode: 'per-app', blockedApps: [], overlay: true, overlayLabel: 'DeepSeek', minimizeHostWindow: false,
-  maxLongEdge: 1366, maxPixels: 1_150_000, jpegQuality: 80, autoScreenshot: true, settleMs: 0,
+  maxLongEdge: 1366, maxPixels: 1_150_000, jpegQuality: 80, autoScreenshot: true, settleMs: 0, pauseOnUserInput: true, userIdleMs: 50,
 }
 const CHROME = { hwnd: 11, exe: 'chrome.exe', title: 'GitHub - Google Chrome', pid: 1, className: 'Chrome_WidgetWin_1', path: '', x: 0, y: 0, width: 2560, height: 1504, minimized: false, maximized: true }
 const HOST = { ...CHROME, hwnd: 22, exe: 'DeepSeek Harness.exe', title: 'chat — DeepSeek Harness' }
@@ -131,5 +131,69 @@ describe('windows tool', () => {
     const value = await t.run('windows', { action: 'list' })
     expect(value.text).toMatch(/chrome\.exe/)
     expect(value.text).toMatch(/your own DeepSeek Harness chat window/)
+  })
+})
+
+describe('keyboard takeover', () => {
+  it('does not act while the user is typing, then returns a fresh screenshot', async () => {
+    const t = setup({ mode: 'allow-all' })
+    await t.run('computer', { action: 'screenshot' })
+    t.helper.emit({ event: 'user_input', reason: 'keyboard' })
+    const value = await t.run('computer', { action: 'type', text: 'hello' })
+    expect(value.text).toMatch(/NOT performed/)
+    expect(value.image).toBeDefined()
+    expect(t.helper.calls.some(c => c.cmd === 'type')).toBe(false)
+    expect(t.helper.calls.some(c => c.cmd === 'overlay_status' && c.args.status === '你正在操作，已暂停')).toBe(true)
+  })
+
+  it('stops a batch when the user types during it', async () => {
+    const t = setup({ mode: 'allow-all' })
+    const original = t.helper.call.bind(t.helper)
+    t.helper.call = async <T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> => {
+      const result = await original<T>(cmd, args)
+      if (cmd === 'click') t.helper.emit({ event: 'user_input', reason: 'keyboard' })
+      return result
+    }
+    const value = await t.run('computer_batch', {
+      actions: [
+        { action: 'left_click', coordinate: [100, 100] },
+        { action: 'type', text: 'never typed' },
+      ],
+    })
+    expect(value.text).toMatch(/user typed on the keyboard meanwhile/)
+    expect(t.helper.calls.some(c => c.cmd === 'type')).toBe(false)
+  })
+
+  it('ignores mouse movement entirely (only keyboard events exist)', async () => {
+    const t = setup({ mode: 'allow-all' })
+    const value = await t.run('computer', { action: 'key', text: 'Return' })
+    expect(value.text).toMatch(/Pressed Return/)
+  })
+})
+
+describe('foreground takeover', () => {
+  it('skips the next action when another window came to the front since the last look', async () => {
+    const t = setup({ mode: 'allow-all' })
+    await t.run('computer', { action: 'screenshot' })
+    t.helper.foreground = { ...CHROME, hwnd: 99, exe: 'Notepad.exe', title: '新建文本文档' }
+    const value = await t.run('computer', { action: 'left_click', coordinate: [100, 100] })
+    expect(value.text).toMatch(/foreground window changed to Notepad\.exe/)
+    expect(t.helper.calls.some(c => c.cmd === 'click')).toBe(false)
+    const again = await t.run('computer', { action: 'left_click', coordinate: [100, 100] })
+    expect(again.text).toMatch(/left click/)
+  })
+
+  it('does not flag window changes the agent caused itself', async () => {
+    const t = setup({ mode: 'allow-all' })
+    await t.run('computer', { action: 'screenshot' })
+    const original = t.helper.call.bind(t.helper)
+    t.helper.call = async <T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> => {
+      const result = await original<T>(cmd, args)
+      if (cmd === 'click') t.helper.foreground = { ...CHROME, hwnd: 77 } // the click opened a window
+      return result
+    }
+    await t.run('computer_batch', { actions: [{ action: 'left_click', coordinate: [10, 10] }] })
+    const value = await t.run('computer_batch', { actions: [{ action: 'key', text: 'ctrl+t' }] })
+    expect(value.text).toMatch(/All 1 actions done/)
   })
 })

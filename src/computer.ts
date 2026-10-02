@@ -21,6 +21,10 @@ export interface Settings {
   jpegQuality: number
   autoScreenshot: boolean
   settleMs: number
+  /** Pause while the user types on the physical keyboard. */
+  pauseOnUserInput: boolean
+  /** How long the keyboard must be quiet before resuming. */
+  userIdleMs: number
 }
 
 export interface WindowInfo extends WindowLike {
@@ -81,7 +85,12 @@ export interface ActionOutcome {
   text: string
   /** A screenshot or zoom image to return to the model. */
   image?: Shot
+  /** The action was not performed because the user took over the keyboard. */
+  skipped?: boolean
 }
+
+/** Actions that wait for the user to stop typing before they run. */
+const INPUT = new Set<Action>([...MUTATING].filter(action => action !== 'mouse_move'))
 
 export class Computer {
   private displays: Display[] = []
@@ -145,7 +154,27 @@ export class Computer {
     await this.refreshDisplays()
     const display = await this.display()
     const size = this.shotSize(display)
-    return this.capture(display, size)
+    const shot = await this.capture(display, size)
+    await this.remember()
+    return shot
+  }
+
+  /** The foreground window as of the model's latest look at the screen. */
+  private seen: WindowInfo | undefined
+
+  private async remember(): Promise<void> {
+    this.seen = await this.foreground().catch(() => undefined)
+  }
+
+  /**
+   * Did another window come to the front since the model last looked, without
+   * the agent acting in between? Then the user (or a popup) changed the screen.
+   */
+  private async foregroundChanged(): Promise<WindowInfo | undefined> {
+    const seen = this.seen
+    if (!seen) return undefined
+    const now = await this.foreground().catch(() => undefined)
+    return now && now.hwnd !== seen.hwnd ? now : undefined
   }
 
   private async capture(rect: { x: number; y: number; width: number; height: number }, out: Size): Promise<Shot> {
@@ -189,6 +218,7 @@ export class Computer {
   /** Short description of the frontmost window, for result text. */
   async describeForeground(): Promise<string> {
     const win = await this.foreground().catch(() => undefined)
+    this.seen = win
     if (!win) return 'Foreground window: none (desktop).'
     return `Foreground window: ${win.exe} — "${win.title.slice(0, 80)}".`
   }
@@ -239,6 +269,30 @@ export class Computer {
     if (call.signal.aborted) throw new Error('Cancelled.')
     await this.overlay.begin(call.agent, Computer.statusOf(input))
     const { action } = input
+    const s = this.settings()
+    if (s.pauseOnUserInput && INPUT.has(action) && await this.overlay.waitForUserIdle(call.signal, s.userIdleMs)) {
+      // The screen may have changed under the model's feet: re-plan from a fresh look.
+      await this.overlay.begin(call.agent, Computer.statusOf(input))
+      return {
+        text: `Not done: the user was typing on the keyboard, so you were paused until they stopped. ${action} was NOT performed. Look at the new screenshot and re-plan before acting.`,
+        ...(call.vision ? { image: await this.screenshot() } : {}),
+        skipped: true,
+      }
+    }
+    if (s.pauseOnUserInput && INPUT.has(action)) {
+      const changed = await this.foregroundChanged()
+      if (changed) {
+        const image = call.vision ? await this.screenshot() : undefined
+        if (!image) this.seen = changed
+        return {
+          text: `Not done: since your last look the foreground window changed to ${changed.exe} ("${changed.title.slice(0, 60)}") without you acting, most likely the user opened it. ${action} was NOT performed. Look at the new screenshot and decide whether to continue there, switch back, or ask the user.`,
+          ...(image ? { image } : {}),
+          skipped: true,
+        }
+      }
+    }
+    // From here the agent itself may change the foreground; only a new look re-arms the check.
+    if (INPUT.has(action)) this.seen = undefined
     switch (action) {
       case 'screenshot': {
         const shot = await this.screenshot()

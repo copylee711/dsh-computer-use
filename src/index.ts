@@ -31,6 +31,8 @@ export interface Config {
   maxPixels?: number
   jpegQuality?: number
   blockedApps?: string[]
+  pauseOnUserInput?: boolean
+  userIdleMs?: number
 }
 
 const DEFAULTS: Settings = {
@@ -44,6 +46,8 @@ const DEFAULTS: Settings = {
   maxPixels: 1_150_000,
   jpegQuality: 80,
   blockedApps: [],
+  pauseOnUserInput: true,
+  userIdleMs: 1500,
 }
 
 export const Config: z<Config> = z.object({
@@ -86,6 +90,14 @@ export const Config: z<Config> = z.object({
     'zh-CN': { $description: '截图 JPEG 质量' },
     'en-US': { $description: 'Screenshot JPEG quality' },
   }),
+  pauseOnUserInput: z.boolean().default(true).volatile().i18n({
+    'zh-CN': { $description: '检测到你在操作时让出控制：你用键盘打字时暂停、停手后继续；你切换或打开了新窗口时，AI 重新看屏幕再决定（鼠标移动不会触发）' },
+    'en-US': { $description: 'Yield to you: pause while you type, and re-check the screen when you bring up another window (mouse movement is ignored)' },
+  }),
+  userIdleMs: z.natural().min(300).max(10_000).default(1500).volatile().i18n({
+    'zh-CN': { $description: '键盘停止多少毫秒后恢复操作' },
+    'en-US': { $description: 'Milliseconds of keyboard quiet before resuming' },
+  }),
   blockedApps: z.array(z.string()).default([]).volatile().i18n({
     'zh-CN': { $description: '禁止操控的应用（名称或 exe，如 “alipay”）。常见密码管理器默认已禁止。' },
     'en-US': { $description: 'Apps that may never be controlled (names or exe). Common password managers are always blocked.' },
@@ -102,11 +114,11 @@ export function resolveConfig(raw: unknown): Settings {
         : value
     }
   }
-  const num = (key: 'settleMs' | 'maxLongEdge' | 'maxPixels' | 'jpegQuality', min: number, max: number): number => {
+  const num = (key: 'settleMs' | 'maxLongEdge' | 'maxPixels' | 'jpegQuality' | 'userIdleMs', min: number, max: number): number => {
     const value = out[key]
     return typeof value === 'number' && Number.isFinite(value) ? Math.min(max, Math.max(min, Math.round(value))) : DEFAULTS[key]
   }
-  const bool = (key: 'overlay' | 'minimizeHostWindow' | 'autoScreenshot'): boolean => typeof out[key] === 'boolean' ? out[key] : DEFAULTS[key]
+  const bool = (key: 'overlay' | 'minimizeHostWindow' | 'autoScreenshot' | 'pauseOnUserInput'): boolean => typeof out[key] === 'boolean' ? out[key] : DEFAULTS[key]
   return {
     accessMode: out.accessMode === 'allow-all' || out.accessMode === 'per-app' ? out.accessMode : DEFAULTS.accessMode,
     overlay: bool('overlay'),
@@ -117,6 +129,8 @@ export function resolveConfig(raw: unknown): Settings {
     maxLongEdge: num('maxLongEdge', 640, 3840),
     maxPixels: num('maxPixels', 300_000, 8_000_000),
     jpegQuality: num('jpegQuality', 30, 100),
+    pauseOnUserInput: bool('pauseOnUserInput'),
+    userIdleMs: num('userIdleMs', 300, 10_000),
     blockedApps: Array.isArray(out.blockedApps) ? out.blockedApps.filter((item): item is string => typeof item === 'string' && item.trim() !== '') : [],
   }
 }

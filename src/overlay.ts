@@ -36,7 +36,33 @@ export class OverlayController {
   ) {
     helper.onEvent(event => {
       if (event.event === 'stop') this.stop(event.reason ?? 'user')
+      else if (event.event === 'user_input') this.lastUserInput = Date.now()
     })
+  }
+
+  /** When the user last typed on the physical keyboard while the overlay was up (ms epoch). */
+  lastUserInput = 0
+
+  /** Did the user type after `since`? */
+  userTypedSince(since: number): boolean {
+    return this.lastUserInput > since
+  }
+
+  /**
+   * If the user is typing, pause until the keyboard has been quiet for
+   * `idleMs`. Throws after `maxMs` so the model can tell the user. Returns
+   * whether it had to wait.
+   */
+  async waitForUserIdle(signal: AbortSignal, idleMs: number, maxMs = 120_000): Promise<boolean> {
+    if (Date.now() - this.lastUserInput >= idleMs) return false
+    const started = Date.now()
+    if (this.settings().overlay && this.visible) await this.helper.call('overlay_status', { status: '你正在操作，已暂停' }).catch(() => {})
+    while (Date.now() - this.lastUserInput < idleMs) {
+      if (signal.aborted) throw new Error('Cancelled.')
+      if (Date.now() - started > maxMs) throw new Error('The user has been typing on the keyboard for a while, so computer use is paused. Ask the user whether to continue.')
+      await new Promise(resolve => setTimeout(resolve, 200))
+    }
+    return true
   }
 
   /** The agent currently driving the computer, if any. */

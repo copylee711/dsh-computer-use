@@ -132,9 +132,15 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       for (const [index, input] of actions.entries()) {
         if (input.action === 'screenshot' || input.action === 'zoom') { failure = `#${index + 1} ${input.action}: not allowed in a batch.`; break }
         try {
+          const stepStart = Date.now()
           const outcome = await computer.run(input, call)
+          if (outcome.skipped) { failure = `#${index + 1} ${input.action} skipped: the user was typing on the keyboard. Re-check the screen before continuing.`; break }
           lines.push(`#${index + 1} ${outcome.text}`)
           await sleep(60, undefined, { signal: call.signal })
+          if (computer.settings().pauseOnUserInput && computer.overlay.userTypedSince(stepStart - 1)) {
+            failure = `#${index + 1} done, but the user typed on the keyboard meanwhile; remaining actions stopped. Re-check the screen before continuing.`
+            break
+          }
         } catch (error) {
           if (call.signal.aborted) { await computer.releaseHeld(); throw error }
           failure = `#${index + 1} ${input.action} failed: ${error instanceof Error ? error.message : String(error)}`

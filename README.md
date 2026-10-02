@@ -2,16 +2,17 @@
 
 [![npm](https://img.shields.io/npm/v/@copylee/dsh-computer-use)](https://www.npmjs.com/package/@copylee/dsh-computer-use)
 
-让 DeepSeek Harness 像 Claude 的 Computer Use 一样操控你的 Windows 电脑：看屏幕、点鼠标、敲键盘，打开应用、切换窗口、读写剪贴板。控制期间屏幕四周会泛起**橙色光晕**，顶部出现“**DeepSeek 正在使用你的电脑**”提示条，按 **Esc** 或点“停止”立即中断。
+让 DeepSeek Harness 直接操控你的 Windows 电脑：看屏幕、点鼠标、敲键盘，打开应用、切换窗口、读写剪贴板。控制期间屏幕四周会泛起**橙色光晕**，顶部出现“**DeepSeek 正在使用你的电脑**”提示条，按 **Esc** 或点“停止”立即中断。
 
 | 功能 | 说明 |
 |---|---|
 | 截图即坐标系 | 模型只用最近一张截图的像素坐标，DPI、缩放、多显示器偏移全部由插件换算，高分屏（200% 缩放）也点得准 |
 | 动作后自动回传截图 | 点击 / 输入 / 按键后自动等界面稳定再截图，少一轮调用 |
 | 批量动作 | `computer_batch` 一次执行“点输入框 → 输入 → 回车”等多步，最后只截一张图 |
-| 按应用授权 | 仿 Claude：先 `request_access` 列出要操控的应用，经 DSH 原生审批后才能操作；也可改为“全部允许” |
+| 按应用授权 | 先 `request_access` 列出要操控的应用，经 DSH 原生审批后才能操作；也可改为“全部允许” |
 | 不会操作自己 | 永远拒绝向 DeepSeek Harness 自身窗口输入；常见密码管理器默认禁止，可再自定义禁用列表 |
 | 正在控制的提示 | 橙色光晕 + 胶囊提示条（显示当前动作），**不会出现在截图里**；真实按下的 Esc 才算停止，插件自己发的 Esc 不会误触发 |
+| 你随时可以插手 | 你用键盘打字时 AI 自动暂停，停手 1.5 秒后继续；你切换或打开了别的窗口，AI 下一步不会盲目执行，而是先看新截图再决定。鼠标移动不会触发，避免误触 |
 | 中文输入 | Unicode 直接输入，不受输入法状态影响；长文本走剪贴板并自动恢复原剪贴板 |
 | 看不见图的模型 | `ui_elements` 用 Windows UI Automation 列出可点击元素和坐标，纯文本模型也能用 |
 | 零原生依赖 | 首次使用时用 Windows 自带的 .NET Framework `csc.exe` 编译一个小 helper（约 1 秒，之后缓存），不需要 node-gyp、不受 Electron ABI 影响 |
@@ -40,13 +41,13 @@ dsh plugin --profile web add @copylee/dsh-computer-use@latest
 
 按应用授权模式下，模型会先请求操控对应应用，你在 DSH 里批准即可。会话权限为“完全权限”或“自动审查”（不弹审批）时，请求会被自动批准，但 DeepSeek Harness 自身和禁用列表里的应用仍然不可操作。
 
-**随时按 Esc 停止**，或点提示条上的“停止”。
+**随时按 Esc 停止**，或点提示条上的“停止”。想临时帮一把也可以直接上手：打字时 AI 会等你，切到别的窗口后 AI 会先重新看屏幕。
 
 ## Agent 工具
 
 | 工具 | 作用 |
 |---|---|
-| `computer` | 单个动作：`screenshot` `left_click` `double_click` `triple_click` `right_click` `middle_click` `mouse_move` `left_click_drag` `left_mouse_down/up` `scroll` `type` `key` `hold_key` `wait` `zoom` `cursor_position`（与 Anthropic computer tool 同名同参） |
+| `computer` | 单个动作：`screenshot` `left_click` `double_click` `triple_click` `right_click` `middle_click` `mouse_move` `left_click_drag` `left_mouse_down/up` `scroll` `type` `key` `hold_key` `wait` `zoom` `cursor_position`（沿用通用 computer-use 动作命名，模型上手即会） |
 | `computer_batch` | 顺序执行多个动作，遇错即停，最后回传一张截图 |
 | `open_application` | 按名称（“Chrome”“记事本”“微信”）、exe 路径或网址打开应用；已运行则切到前台 |
 | `windows` | 列出窗口（含进程 exe 名）、聚焦 / 最小化 / 最大化 / 还原 / 关闭 |
@@ -68,6 +69,8 @@ dsh plugin --profile web add @copylee/dsh-computer-use@latest
 | 操作后自动截图 | 开 | 关闭可省 token，但模型需要自己截图 |
 | 等待稳定 | 400 ms | 动作后多久再截图 |
 | 截图最长边 / 总像素 / JPEG 质量 | 1366 / 1.15MP / 80 | 越大越清晰、越费 token |
+| 检测到你在操作时让出控制 | 开 | 键盘输入暂停、窗口被切换时重新看屏幕 |
+| 键盘静止多久后恢复 | 1500 ms | |
 | 禁止操控的应用 | 空 | 名称或 exe，如 `alipay` |
 
 ## 数据与隐私

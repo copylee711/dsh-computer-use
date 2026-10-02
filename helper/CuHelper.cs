@@ -1234,13 +1234,25 @@ namespace DshComputerUse
             hook = IntPtr.Zero;
         }
 
+        static long lastTyping;
+
         static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
             if (nCode >= 0 && visible && (wParam.ToInt32() == 0x100 || wParam.ToInt32() == 0x104))
             {
                 var kb = (Native.KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(Native.KBDLLHOOKSTRUCT));
-                // Only a physical Esc counts: our own SendInput sets LLKHF_INJECTED (0x10).
-                if (kb.vkCode == 0x1B && (kb.flags & 0x10) == 0) Program.EmitEvent("stop", "esc");
+                // Only physical keys count: our own SendInput sets LLKHF_INJECTED (0x10).
+                if ((kb.flags & 0x10) == 0)
+                {
+                    if (kb.vkCode == 0x1B) Program.EmitEvent("stop", "esc");
+                    else
+                    {
+                        // The user is typing: let the host pause. Throttled; mouse
+                        // movement is deliberately ignored (too easy to nudge).
+                        long now = Environment.TickCount;
+                        if (now - lastTyping > 250) { lastTyping = now; Program.EmitEvent("user_input", "keyboard"); }
+                    }
+                }
             }
             return Native.CallNextHookEx(hook, nCode, wParam, lParam);
         }

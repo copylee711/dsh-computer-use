@@ -14,5 +14,5 @@ ${access}- Start with a screenshot (computer action "screenshot") unless you jus
 - Actions return a fresh screenshot. Check it before continuing and verify the result instead of assuming success. Use computer_batch for several confident steps in a row.
 - If the user has a dedicated tool for a website or service (browser automation, an API tool), prefer it over driving the desktop.
 - Do not enter passwords, payment details or solve CAPTCHAs: stop and ask the user to do that step. Ask before irreversible actions (sending messages, deleting, purchasing) unless the user clearly asked for them.
-- The user sees an orange border and can press Esc at any time to stop you.`
+- The user sees an orange border and can press Esc at any time to stop you. If they type on the keyboard you are paused; when an action reports it was not performed, re-check the screen instead of repeating it blindly.`
 }

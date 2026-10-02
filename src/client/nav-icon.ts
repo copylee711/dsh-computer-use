@@ -32,19 +32,30 @@ export function registerNavIcon(label: string): () => void {
   style.textContent = navIconCss
   document.head.appendChild(style)
   let disposed = false
+  let frame = 0
   const sync = (): void => {
+    frame = 0
     if (disposed) return
-    for (const button of document.querySelectorAll('[role="dialog"] nav button')) {
-      const mine = button.textContent?.trim() === label
-      if (mine && !button.hasAttribute(MARKER)) button.setAttribute(MARKER, '')
-      else if (!mine && button.hasAttribute(MARKER)) button.removeAttribute(MARKER)
+    const dialogs = document.querySelectorAll('[role="dialog"]')
+    if (dialogs.length === 0) return
+    for (const dialog of dialogs) {
+      for (const button of dialog.querySelectorAll('nav button')) {
+        const mine = button.textContent?.trim() === label
+        if (mine && !button.hasAttribute(MARKER)) button.setAttribute(MARKER, '')
+        else if (!mine && button.hasAttribute(MARKER)) button.removeAttribute(MARKER)
+      }
     }
   }
   sync()
-  const observer = new MutationObserver(sync)
-  observer.observe(document.body, { childList: true, subtree: true, characterData: true })
+  // Coalesce bursts (app start-up, streaming replies) into one check per frame;
+  // only element insertions matter, so text updates are not observed.
+  const observer = new MutationObserver(() => {
+    if (frame === 0) frame = requestAnimationFrame(sync)
+  })
+  observer.observe(document.body, { childList: true, subtree: true })
   return () => {
     disposed = true
+    if (frame !== 0) cancelAnimationFrame(frame)
     observer.disconnect()
     style.remove()
     document.querySelectorAll(`[${MARKER}]`).forEach(element => element.removeAttribute(MARKER))

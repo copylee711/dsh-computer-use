@@ -5,7 +5,7 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { defineTool, type ToolCallView } from '@deepseek-ai/dsh-tools'
-import { appMatches, isHostWindow, normalizeApp } from './access.js'
+import { appMatches, isHostWindow, isTransientShell, normalizeApp } from './access.js'
 import { ACTIONS, Computer, UNCHANGED_TEXT, type ActionInput, type CallContext, type Shot, type WindowInfo } from './computer.js'
 
 type ToolDefinition = ReturnType<typeof defineTool>
@@ -203,7 +203,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
         for (let i = 0; i < 32; i++) {
           await sleep(250, undefined, { signal: call.signal })
           const now = await computer.foreground()
-          if (now && now.hwnd !== before?.hwnd && !isHostWindow(now) && (now.exe.toLowerCase() !== 'explorer.exe' || now.className === 'CabinetWClass')) break
+          if (now && now.hwnd !== before?.hwnd && !isHostWindow(now) && !isTransientShell(now) && (now.exe.toLowerCase() !== 'explorer.exe' || now.className === 'CabinetWClass')) break
         }
       }
       const fg = await computer.foreground()
@@ -237,11 +237,16 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       }
       const target = hwnd !== undefined
         ? rows.find(win => win.hwnd === hwnd)
-        : name ? rows.find(win => appMatches(name, win) || win.title.toLowerCase().includes(name.toLowerCase())) : undefined
+        // By name: the program first, then a title match; DeepSeek Harness's own
+        // window (whose title often quotes the task, e.g. "用 Chrome 打开…") last.
+        : name ? rows.find(win => !isHostWindow(win) && appMatches(name, win))
+          ?? rows.find(win => !isHostWindow(win) && win.title.toLowerCase().includes(name.toLowerCase()))
+          ?? rows.find(win => appMatches(name, win)) : undefined
       if (!target) throw new Error('Window not found; call windows with action "list".')
       const settings = computer.settings()
       const denial = computer.access.denial(call.session, target, settings.accessMode, settings.blockedApps, action)
-      if (denial && !(action === 'minimize' && isHostWindow(target))) throw new Error(denial)
+      // Minimizing is harmless and reversible: allowed for any window, so you can clear what is in the way.
+      if (denial && action !== 'minimize') throw new Error(denial)
       await computer.overlay.begin(call.agent, `窗口 ${action}`)
       await computer.overlay.yieldToUser(call.signal, false)
       let text: string

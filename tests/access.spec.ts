@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { AccessControl, appMatches } from '../src/access.js'
+import { AccessControl, appMatches, isTransientShell } from '../src/access.js'
 
 const chrome = { exe: 'chrome.exe', title: 'GitHub - Google Chrome' }
 const host = { exe: 'DeepSeek Harness.exe', title: '打开 chrome — DeepSeek Harness' }
@@ -53,5 +53,11 @@ describe('access control', () => {
     expect(access.missing('s1', ['文件资源管理器', '计算器'])).toEqual(['计算器'])
     access.grant('s1', ['计算器'])
     expect(access.missing('s1', ['设置'])).toEqual(['设置']) // UWP frame host alone does not link them
+  })
+
+  it('recognises transient shell surfaces', () => {
+    expect(isTransientShell({ exe: 'TextInputHost.exe', title: 'Windows 输入体验' })).toBe(true)
+    expect(isTransientShell({ exe: 'explorer.exe', title: '贴靠助手' })).toBe(true)
+    expect(isTransientShell({ exe: 'explorer.exe', title: '此电脑 - 文件资源管理器', className: 'CabinetWClass' } as never)).toBe(false)
   })
 })

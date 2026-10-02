@@ -4,7 +4,7 @@
  * will receive the input, overlay status, and post-action screenshots.
  */
 import { setTimeout as sleep } from 'node:timers/promises'
-import { isHostWindow, type AccessControl, type AccessMode, type WindowLike } from './access.js'
+import { isHostWindow, isTransientShell, type AccessControl, type AccessMode, type WindowLike } from './access.js'
 import { contains, regionToPhysical, screenshotSize, toPhysical, toScreenshot, type Display, type Point, type Size } from './coords.js'
 import type { HelperLike } from './helper-client.js'
 import { parseKeys, parseModifiers } from './keys.js'
@@ -154,10 +154,7 @@ export class Computer {
   private async point(coordinate: number[] | undefined, field = 'coordinate'): Promise<Point> {
     if (!Array.isArray(coordinate) || coordinate.length !== 2) throw new Error(`${field} must be [x, y] in screenshot pixels.`)
     const display = await this.display()
-    const p = toPhysical({ x: coordinate[0]!, y: coordinate[1]! }, display, this.shotSize(display))
-    // Pointing under the DeepSeek Harness card moves the card out of the way.
-    await this.overlay.dodgeCard(p)
-    return p
+    return toPhysical({ x: coordinate[0]!, y: coordinate[1]! }, display, this.shotSize(display))
   }
 
   async toModel(point: Point): Promise<Point & { offscreen: boolean }> {
@@ -244,7 +241,7 @@ export class Computer {
   async foreground(): Promise<WindowInfo | undefined> {
     const win = await this.helper.call<Partial<WindowInfo> | null>('foreground')
     if (!win || typeof win.hwnd !== 'number') return undefined
-    if (!isHostWindow(win as WindowInfo)) this.lastTarget = win as WindowInfo
+    if (!isHostWindow(win as WindowInfo) && !isTransientShell(win as WindowInfo)) this.lastTarget = win as WindowInfo
     return win as WindowInfo
   }
 
@@ -256,7 +253,7 @@ export class Computer {
   private async refocusFromHost(): Promise<void> {
     const target = this.lastTarget
     const fg = await this.foreground().catch(() => undefined)
-    if (!fg || !isHostWindow(fg) || !target || target.hwnd === fg.hwnd) return
+    if (!fg || !(isHostWindow(fg) || isTransientShell(fg)) || !target || target.hwnd === fg.hwnd) return
     const result = await this.focus(target).catch(() => undefined)
     if (result?.focused) await sleep(80)
   }
@@ -355,7 +352,7 @@ export class Computer {
     if (s.pauseOnUserInput && INPUT.has(action)) {
       const changed = await this.foregroundChanged()
       // Clicking into the DeepSeek Harness card is the user reading the chat, not a new task.
-      if (changed && !isHostWindow(changed)) {
+      if (changed && !isHostWindow(changed) && !isTransientShell(changed)) {
         await this.overlay.status('检测到窗口切换，重新查看屏幕')
         const image = call.vision ? await this.screenshot() : undefined
         if (!image) this.seen = changed

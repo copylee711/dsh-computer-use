@@ -79,6 +79,8 @@ namespace DshComputerUse
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr hwnd, StringBuilder sb, int max);
         [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hwnd, uint cmd);
         [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hwnd, int index);
+        [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hwnd, int index, int value);
+        [DllImport("user32.dll")] public static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint key, byte alpha, uint flags);
         [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
         [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
@@ -254,11 +256,11 @@ namespace DshComputerUse
                 case "shot_mark": Screen2.Mark(r); return null;
                 case "shot_diff": return Screen2.Diff(r);
                 case "cursor": { Native.POINT p; Native.GetCursorPos(out p); return Pt(p.X, p.Y); }
-                case "move": Overlay.Dodge(Args.Int(r, "x", 0), Args.Int(r, "y", 0)); Input.Move(Args.Int(r, "x", 0), Args.Int(r, "y", 0)); return null;
-                case "click": return Input.Click(r);
-                case "button": return Input.Button(r);
-                case "drag": return Input.Drag(r);
-                case "scroll": return Input.Scroll(r);
+                case "move": using (new PassThrough()) { Overlay.Dodge(Args.Int(r, "x", 0), Args.Int(r, "y", 0)); Input.Move(Args.Int(r, "x", 0), Args.Int(r, "y", 0)); } return null;
+                case "click": using (new PassThrough()) return Input.Click(r);
+                case "button": using (new PassThrough()) return Input.Button(r);
+                case "drag": using (new PassThrough()) return Input.Drag(r);
+                case "scroll": using (new PassThrough()) return Input.Scroll(r);
                 case "keys": return Input.Keys(r);
                 case "key_state": return Input.KeyState(r);
                 case "type": return Input.Type(Args.Str(r, "text", ""), Args.Int(r, "chunkDelay", 8));
@@ -316,7 +318,12 @@ namespace DshComputerUse
         }
 
         /** Sample every 8th pixel of a screen rectangle (BGR bytes). */
-        static byte[] Sample(int x, int y, int w, int h)
+        /**
+         * composite: paint what is under the DSH card (exact, slower: used once
+         * per action). Otherwise the card area is blanked so its own updates
+         * (streaming text, timers) never look like screen activity.
+         */
+        static byte[] Sample(int x, int y, int w, int h, bool composite)
         {
             using (var bmp = new Bitmap(w, h, PixelFormat.Format24bppRgb))
             {
@@ -324,8 +331,12 @@ namespace DshComputerUse
                 {
                     IntPtr dst = g.GetHdc();
                     IntPtr src = Native.GetDC(IntPtr.Zero);
-                    try { Native.BitBlt(dst, 0, 0, w, h, src, x, y, 0x00CC0020 | 0x40000000); }
-                    finally { Native.ReleaseDC(IntPtr.Zero, src); g.ReleaseHdc(dst); }
+                    using (composite ? CardLayer.Hide() : null)
+                    {
+                        try { Native.BitBlt(dst, 0, 0, w, h, src, x, y, 0x00CC0020 | 0x40000000); }
+                        finally { Native.ReleaseDC(IntPtr.Zero, src); g.ReleaseHdc(dst); }
+                    }
+                    if (!composite) CardLayer.Blank(g, x, y);
                 }
                 var data = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
                 try
@@ -354,7 +365,7 @@ namespace DshComputerUse
         public static void Mark(Dictionary<string, object> r)
         {
             int x = Args.Int(r, "x", 0), y = Args.Int(r, "y", 0), w = Args.Int(r, "width", 0), h = Args.Int(r, "height", 0);
-            marked = Sample(x, y, w, h);
+            marked = Sample(x, y, w, h, true);
             markedRect = RectKey(x, y, w, h);
         }
 
@@ -363,7 +374,7 @@ namespace DshComputerUse
         {
             int x = Args.Int(r, "x", 0), y = Args.Int(r, "y", 0), w = Args.Int(r, "width", 0), h = Args.Int(r, "height", 0);
             var d = new Dictionary<string, object>();
-            d["diff"] = marked == null || markedRect != RectKey(x, y, w, h) ? -1.0 : Changed(marked, Sample(x, y, w, h));
+            d["diff"] = marked == null || markedRect != RectKey(x, y, w, h) ? -1.0 : Changed(marked, Sample(x, y, w, h, true));
             return d;
         }
 
@@ -386,13 +397,13 @@ namespace DshComputerUse
             int minMs = Args.Int(r, "minMs", 300), maxMs = Args.Int(r, "maxMs", 2500), interval = Args.Int(r, "intervalMs", 120), quietMs = Args.Int(r, "quietMs", 240);
             if (w <= 0 || h <= 0) throw new Exception("invalid settle rect");
             var watch = System.Diagnostics.Stopwatch.StartNew();
-            byte[] prev = Sample(x, y, w, h);
+            byte[] prev = Sample(x, y, w, h, false);
             long quietSince = -1;
             bool stable = false;
             while (true)
             {
                 Thread.Sleep(interval);
-                byte[] cur = Sample(x, y, w, h);
+                byte[] cur = Sample(x, y, w, h, false);
                 long now = watch.ElapsedMilliseconds;
                 if (Changed(prev, cur) < 0.002) { if (quietSince < 0) quietSince = now - interval; }
                 else quietSince = -1;
@@ -420,8 +431,12 @@ namespace DshComputerUse
                 {
                     IntPtr dst = g.GetHdc();
                     IntPtr src = Native.GetDC(IntPtr.Zero);
-                    try { Native.BitBlt(dst, 0, 0, w, h, src, x, y, 0x00CC0020 | 0x40000000); }
-                    finally { Native.ReleaseDC(IntPtr.Zero, src); g.ReleaseHdc(dst); }
+                    // The DSH card is for the user only: capture what is under it.
+                    using (CardLayer.Hide())
+                    {
+                        try { Native.BitBlt(dst, 0, 0, w, h, src, x, y, 0x00CC0020 | 0x40000000); }
+                        finally { Native.ReleaseDC(IntPtr.Zero, src); g.ReleaseHdc(dst); }
+                    }
                 }
                 Bitmap output = bmp;
                 Bitmap scaled = null;
@@ -770,6 +785,108 @@ namespace DshComputerUse
         }
     }
 
+    /**
+     * The DeepSeek Harness card floats on top for the user only. To the agent
+     * it is transparent: while a screenshot is taken the card is made fully
+     * transparent for a few milliseconds (another process's window cannot be
+     * excluded from capture), and its pointer input passes through.
+     */
+    internal static class CardLayer
+    {
+        public static IntPtr Hwnd = IntPtr.Zero;
+        static int originalEx;
+
+        static bool Live()
+        {
+            return Hwnd != IntPtr.Zero && Native.IsWindow(Hwnd) && Native.IsWindowVisible(Hwnd) && !Native.IsIconic(Hwnd);
+        }
+
+        public static uint Pid()
+        {
+            if (!Live()) return 0;
+            uint pid; Native.GetWindowThreadProcessId(Hwnd, out pid);
+            return pid;
+        }
+
+        /** The card becomes a (fully opaque) layered window so its alpha can be dropped instantly. */
+        public static void Attach(IntPtr hwnd)
+        {
+            if (Hwnd == hwnd) return;
+            Detach();
+            Hwnd = hwnd;
+            originalEx = Native.GetWindowLong(hwnd, -20);
+            Native.SetWindowLong(hwnd, -20, originalEx | 0x80000);
+            Native.SetLayeredWindowAttributes(hwnd, 0, 255, 2);
+        }
+
+        public static void Detach()
+        {
+            var hwnd = Hwnd;
+            Hwnd = IntPtr.Zero;
+            if (hwnd != IntPtr.Zero && Native.IsWindow(hwnd)) Native.SetWindowLong(hwnd, -20, originalEx);
+        }
+
+        public static Rectangle Frame(IntPtr hwnd)
+        {
+            Native.RECT rc;
+            if (Native.DwmGetWindowAttribute(hwnd, 9, out rc, Marshal.SizeOf(typeof(Native.RECT))) != 0) Native.GetWindowRect(hwnd, out rc);
+            return new Rectangle(rc.Left, rc.Top, rc.Right - rc.Left, rc.Bottom - rc.Top);
+        }
+
+        /** g draws a bitmap whose (0, 0) is screen (ox, oy): fill the card area with a constant. */
+        public static void Blank(Graphics g, int ox, int oy)
+        {
+            if (!Live()) return;
+            var r = Frame(Hwnd);
+            r.Inflate(32, 32); // its drop shadow too (wide at 200% scaling)
+            g.FillRectangle(Brushes.Black, r.X - ox, r.Y - oy, r.Width, r.Height);
+        }
+
+        /** Make the card invisible while a capture runs (dispose to show it again). */
+        public static IDisposable Hide()
+        {
+            return new Hidden(Live() ? Hwnd : IntPtr.Zero);
+        }
+
+        sealed class Hidden : IDisposable
+        {
+            readonly IntPtr hwnd;
+            public Hidden(IntPtr hwnd)
+            {
+                this.hwnd = hwnd;
+                if (hwnd != IntPtr.Zero) Native.SetLayeredWindowAttributes(hwnd, 0, 0, 2);
+            }
+            public void Dispose()
+            {
+                if (hwnd != IntPtr.Zero && Native.IsWindow(hwnd)) Native.SetLayeredWindowAttributes(hwnd, 0, 255, 2);
+            }
+        }
+    }
+
+    /** While the agent moves, clicks or scrolls, the card lets the mouse through. */
+    internal sealed class PassThrough : IDisposable
+    {
+        readonly IntPtr hwnd;
+        readonly int oldEx;
+        readonly bool active;
+
+        public PassThrough()
+        {
+            hwnd = CardLayer.Hwnd;
+            if (hwnd == IntPtr.Zero || !Native.IsWindow(hwnd)) return;
+            oldEx = Native.GetWindowLong(hwnd, -20);
+            Native.SetWindowLong(hwnd, -20, oldEx | 0x20 | 0x80000); // WS_EX_TRANSPARENT (layered already)
+            active = true;
+        }
+
+        public void Dispose()
+        {
+            if (!active) return;
+            Thread.Sleep(60); // let the injected input reach its target first
+            if (Native.IsWindow(hwnd)) Native.SetWindowLong(hwnd, -20, oldEx);
+        }
+    }
+
     internal static class Windows
     {
         public static string ExePath(uint pid)
@@ -838,7 +955,8 @@ namespace DshComputerUse
             if (h != IntPtr.Zero) h = Native.GetAncestor(h, 2); // GA_ROOT
             uint pid = 0;
             if (h != IntPtr.Zero) Native.GetWindowThreadProcessId(h, out pid);
-            if (h == IntPtr.Zero || pid == (uint)Process.GetCurrentProcess().Id)
+            uint cardPid = CardLayer.Pid();
+            if (h == IntPtr.Zero || pid == (uint)Process.GetCurrentProcess().Id || (cardPid != 0 && pid == cardPid))
             {
                 // Our own status pill is under the point (it dodges before the
                 // click): report the topmost foreign window there instead.
@@ -848,8 +966,9 @@ namespace DshComputerUse
                 {
                     if (!Native.IsWindowVisible(w)) return true;
                     uint p; Native.GetWindowThreadProcessId(w, out p);
-                    if (p == self) return true;
+                    if (p == self || (cardPid != 0 && p == cardPid)) return true; // our overlay, the DSH card
                     if ((Native.GetWindowLong(w, -20) & 0x20) != 0) return true; // WS_EX_TRANSPARENT
+                    if (Native.IsIconic(w)) return true;
                     int cloaked;
                     if (Native.DwmGetWindowAttribute(w, 14, out cloaked, 4) == 0 && cloaked != 0) return true;
                     Native.RECT rc; Native.GetWindowRect(w, out rc);
@@ -901,6 +1020,15 @@ namespace DshComputerUse
                     Native.SendInput(3, inputs, Marshal.SizeOf(typeof(Native.INPUT)));
                     Thread.Sleep(120);
                 }
+                if (Native.GetForegroundWindow() != hwnd)
+                {
+                    // Last resort: restoring a minimized window always activates it.
+                    bool zoomed = Native.IsZoomed(hwnd);
+                    Native.ShowWindow(hwnd, 6); // SW_MINIMIZE
+                    Thread.Sleep(150);
+                    Native.ShowWindow(hwnd, zoomed ? 3 : 9); // SW_MAXIMIZE / SW_RESTORE
+                    Thread.Sleep(200);
+                }
             }
             var d = Describe(hwnd);
             d["focused"] = Native.GetForegroundWindow() == hwnd;
@@ -913,6 +1041,7 @@ namespace DshComputerUse
         public static object Card(IntPtr hwnd, int x, int y, int w, int h)
         {
             if (!Native.IsWindow(hwnd)) throw new Exception("window no longer exists");
+            CardLayer.Attach(hwnd);
             if (!cards.ContainsKey(hwnd.ToInt64()))
             {
                 var wp = new Native.WINDOWPLACEMENT();
@@ -935,6 +1064,7 @@ namespace DshComputerUse
 
         public static object Uncard(IntPtr hwnd)
         {
+            if (CardLayer.Hwnd == hwnd) CardLayer.Detach();
             Native.WINDOWPLACEMENT wp;
             bool known = cards.TryGetValue(hwnd.ToInt64(), out wp);
             cards.Remove(hwnd.ToInt64());

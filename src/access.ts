@@ -59,6 +59,16 @@ export function sameApp(a: string, b: string): boolean {
   return false
 }
 
+/**
+ * Windows shell surfaces that grab the foreground without being a place to
+ * work: the touch-keyboard / IME host and Snap Assist.
+ */
+export function isTransientShell(win: WindowLike & { className?: string }): boolean {
+  const exe = win.exe.toLowerCase()
+  if (exe === 'textinputhost.exe') return true
+  return exe === 'explorer.exe' && (win.className === 'XamlExplorerHostIslandWindow' || /贴靠助手|snap assist/i.test(win.title))
+}
+
 export function isHostWindow(win: WindowLike): boolean {
   return HOST_EXES.includes(win.exe.toLowerCase())
 }

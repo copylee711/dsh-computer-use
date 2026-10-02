@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest'
 import { AccessControl } from '../src/access.js'
 import { Computer, type Settings } from '../src/computer.js'
 import type { HelperEvent, HelperLike } from '../src/helper-client.js'
-import { OverlayController } from '../src/overlay.js'
+import { OverlayController, cardRect } from '../src/overlay.js'
 import { createTools } from '../src/tools.js'
 
 const SETTINGS: Settings = {
-  accessMode: 'per-app', blockedApps: [], overlay: true, overlayLabel: 'DeepSeek', minimizeHostWindow: false,
+  accessMode: 'per-app', blockedApps: [], overlay: true, overlayLabel: 'DeepSeek Harness', hostWindow: 'keep',
   maxLongEdge: 1366, maxPixels: 1_150_000, jpegQuality: 80, autoScreenshot: true, settleMs: 0, pauseOnUserInput: true, userIdleMs: 50,
 }
 const CHROME = { hwnd: 11, exe: 'chrome.exe', title: 'GitHub - Google Chrome', pid: 1, className: 'Chrome_WidgetWin_1', path: '', x: 0, y: 0, width: 2560, height: 1504, minimized: false, maximized: true }
@@ -100,11 +100,25 @@ describe('computer tool', () => {
     expect(value.text).toMatch(/Foreground window: chrome.exe/)
   })
 
-  it('cancels the controlling agent when the user presses Esc', async () => {
+  it('cancels the controlling agent when the user clicks stop', async () => {
     const t = setup({ mode: 'allow-all' })
     await t.run('computer', { action: 'key', text: 'Return' })
-    t.helper.emit({ event: 'stop', reason: 'esc' })
+    t.helper.emit({ event: 'stop', reason: 'button' })
     expect(t.cancelled()).toBe(1)
+  })
+
+  it('holds actions while paused (Esc) and re-checks the screen after resume', async () => {
+    const t = setup({ mode: 'allow-all' })
+    await t.run('computer', { action: 'screenshot' })
+    t.helper.emit({ event: 'pause', reason: 'user' })
+    const pending = t.run('computer', { action: 'left_click', coordinate: [100, 100] })
+    await new Promise(resolve => setTimeout(resolve, 300))
+    expect(t.helper.calls.some(c => c.cmd === 'click')).toBe(false)
+    t.helper.emit({ event: 'resume', reason: 'user' })
+    const value = await pending
+    expect(value.text).toMatch(/paused computer use \(Esc\) and has now resumed/)
+    expect(t.helper.calls.some(c => c.cmd === 'click')).toBe(false)
+    expect(t.cancelled()).toBe(0)
   })
 })
 
@@ -143,7 +157,6 @@ describe('keyboard takeover', () => {
     expect(value.text).toMatch(/NOT performed/)
     expect(value.image).toBeDefined()
     expect(t.helper.calls.some(c => c.cmd === 'type')).toBe(false)
-    expect(t.helper.calls.some(c => c.cmd === 'overlay_status' && c.args.status === '你正在操作，已暂停')).toBe(true)
   })
 
   it('stops a batch when the user types during it', async () => {
@@ -195,5 +208,15 @@ describe('foreground takeover', () => {
     await t.run('computer_batch', { actions: [{ action: 'left_click', coordinate: [10, 10] }] })
     const value = await t.run('computer_batch', { actions: [{ action: 'key', text: 'ctrl+t' }] })
     expect(value.text).toMatch(/All 1 actions done/)
+  })
+})
+
+describe('floating card', () => {
+  it('fits a bottom-right card inside the work area', () => {
+    const r = cardRect({ x: 0, y: 0, width: 2560, height: 1600, workX: 0, workY: 0, workWidth: 2560, workHeight: 1504, primary: true, dpi: 192 })
+    expect(r.x + r.width).toBeLessThanOrEqual(2560)
+    expect(r.y + r.height).toBeLessThanOrEqual(1504)
+    expect(r.width).toBeGreaterThanOrEqual(800)
+    expect(r.width).toBeLessThanOrEqual(1120)
   })
 })

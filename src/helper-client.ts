@@ -24,10 +24,14 @@ const REFERENCES = [
   'System.Web.Extensions.dll', 'UIAutomationClient.dll', 'UIAutomationTypes.dll', 'WindowsBase.dll',
 ]
 
-/** The helper source at the package root: one level up from lib/ or src/, two from lib/types/. */
-export function helperSourcePath(): string {
-  const candidates = ['../helper/CuHelper.cs', '../../helper/CuHelper.cs'].map(rel => fileURLToPath(new URL(rel, import.meta.url)))
+/** A file in helper/ at the package root: one level up from lib/ or src/, two from lib/types/. */
+export function helperAssetPath(name: string): string {
+  const candidates = [`../helper/${name}`, `../../helper/${name}`].map(rel => fileURLToPath(new URL(rel, import.meta.url)))
   return candidates.find(path => existsSync(path)) ?? candidates[0]!
+}
+
+export function helperSourcePath(): string {
+  return helperAssetPath('CuHelper.cs')
 }
 
 function frameworkDir(): string {

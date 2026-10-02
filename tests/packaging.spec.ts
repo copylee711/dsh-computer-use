@@ -13,6 +13,7 @@ describe('packaging', () => {
   })
   it('ships the helper source that the runtime compiles', () => {
     expect(pkg.files).toContain('helper/CuHelper.cs')
+    expect(pkg.files).toContain('helper/deepseek-white.png')
     expect(existsSync(helperSourcePath())).toBe(true)
   })
   it('keeps the helper within C# 5 (in-box csc)', () => {

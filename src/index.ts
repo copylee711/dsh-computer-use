@@ -12,8 +12,8 @@ import type {} from '@deepseek-ai/dsh-agent'
 import type {} from './system-prompt-service.js'
 import { AccessControl, normalizeApp, type AccessMode } from './access.js'
 import { Computer, type CallContext, type Settings } from './computer.js'
-import { HelperClient } from './helper-client.js'
-import { OverlayController, type CancellableAgent } from './overlay.js'
+import { HelperClient, helperAssetPath } from './helper-client.js'
+import { OverlayController, type CancellableAgent, type HostWindowMode } from './overlay.js'
 import { promptText } from './prompt.js'
 import { createTools } from './tools.js'
 
@@ -24,6 +24,8 @@ export interface Config {
   accessMode?: AccessMode
   overlay?: boolean
   overlayLabel?: string
+  hostWindow?: HostWindowMode
+  /** @deprecated replaced by hostWindow: 'minimize' */
   minimizeHostWindow?: boolean
   autoScreenshot?: boolean
   settleMs?: number
@@ -38,8 +40,8 @@ export interface Config {
 const DEFAULTS: Settings = {
   accessMode: 'per-app',
   overlay: true,
-  overlayLabel: 'DeepSeek',
-  minimizeHostWindow: false,
+  overlayLabel: 'DeepSeek Harness',
+  hostWindow: 'card',
   autoScreenshot: true,
   settleMs: 400,
   maxLongEdge: 1366,
@@ -62,13 +64,17 @@ export const Config: z<Config> = z.object({
     'zh-CN': { $description: '控制时显示橙色光晕边框和顶部提示条（不会出现在截图里，按 Esc 可停止）' },
     'en-US': { $description: 'Show the orange glow and status pill while controlling (hidden from screenshots; Esc stops)' },
   }),
-  overlayLabel: z.string().default('DeepSeek').volatile().i18n({
-    'zh-CN': { $description: '提示条名称：“<名称> 正在使用你的电脑”' },
-    'en-US': { $description: 'Name in the pill: "<name> 正在使用你的电脑"' },
+  overlayLabel: z.string().default('DeepSeek Harness').volatile().i18n({
+    'zh-CN': { $description: '提示条名称：“<名称> 正在操控你的电脑”' },
+    'en-US': { $description: 'Name in the pill: "<name> 正在操控你的电脑"' },
   }),
-  minimizeHostWindow: z.boolean().default(false).volatile().i18n({
-    'zh-CN': { $description: '控制期间最小化 DeepSeek Harness 窗口，结束后恢复' },
-    'en-US': { $description: 'Minimize the DeepSeek Harness window while controlling; restore afterwards' },
+  hostWindow: z.union([
+    z.const('card').i18n({ 'zh-CN': { $description: '缩成右下角置顶悬浮卡片' }, 'en-US': { $description: 'Shrink to an always-on-top card' } }),
+    z.const('minimize').i18n({ 'zh-CN': { $description: '最小化' }, 'en-US': { $description: 'Minimize' } }),
+    z.const('keep').i18n({ 'zh-CN': { $description: '保持不变' }, 'en-US': { $description: 'Leave it as is' } }),
+  ]).default('card').volatile().i18n({
+    'zh-CN': { $description: '操控期间 DeepSeek Harness 窗口怎么摆放（结束后自动恢复原尺寸和位置）' },
+    'en-US': { $description: 'What to do with the DeepSeek Harness window while controlling (restored afterwards)' },
   }),
   autoScreenshot: z.boolean().default(true).volatile().i18n({
     'zh-CN': { $description: '每次操作后自动回传截图（省去一轮调用）' },
@@ -118,12 +124,14 @@ export function resolveConfig(raw: unknown): Settings {
     const value = out[key]
     return typeof value === 'number' && Number.isFinite(value) ? Math.min(max, Math.max(min, Math.round(value))) : DEFAULTS[key]
   }
-  const bool = (key: 'overlay' | 'minimizeHostWindow' | 'autoScreenshot' | 'pauseOnUserInput'): boolean => typeof out[key] === 'boolean' ? out[key] : DEFAULTS[key]
+  const bool = (key: 'overlay' | 'autoScreenshot' | 'pauseOnUserInput'): boolean => typeof out[key] === 'boolean' ? out[key] : DEFAULTS[key]
   return {
     accessMode: out.accessMode === 'allow-all' || out.accessMode === 'per-app' ? out.accessMode : DEFAULTS.accessMode,
     overlay: bool('overlay'),
     overlayLabel: typeof out.overlayLabel === 'string' && out.overlayLabel.trim() !== '' ? out.overlayLabel.trim().slice(0, 40) : DEFAULTS.overlayLabel,
-    minimizeHostWindow: bool('minimizeHostWindow'),
+    hostWindow: out.hostWindow === 'card' || out.hostWindow === 'minimize' || out.hostWindow === 'keep'
+      ? out.hostWindow
+      : out.minimizeHostWindow === true ? 'minimize' : DEFAULTS.hostWindow,
     autoScreenshot: bool('autoScreenshot'),
     settleMs: num('settleMs', 0, 5000),
     maxLongEdge: num('maxLongEdge', 640, 3840),
@@ -152,7 +160,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   const log = (message: string): void => ctx.logger.info(message)
   const helper = new HelperClient(message => ctx.logger.warn(message))
   const access = new AccessControl()
-  const overlay = new OverlayController(helper, settings, log)
+  const overlay = new OverlayController(helper, settings, log, helperAssetPath('deepseek-white.png'))
   const computer = new Computer(helper, access, overlay, settings)
   ctx.effect(() => () => {
     void overlay.end().finally(() => helper.dispose())

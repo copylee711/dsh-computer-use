@@ -92,6 +92,10 @@ namespace DshComputerUse
         [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
         [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int w, int h, uint flags);
         [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT r);
+        [StructLayout(LayoutKind.Sequential)]
+        public struct WINDOWPLACEMENT { public int length; public int flags; public int showCmd; public POINT ptMinPosition; public POINT ptMaxPosition; public RECT rcNormalPosition; }
+        [DllImport("user32.dll")] public static extern bool GetWindowPlacement(IntPtr hwnd, ref WINDOWPLACEMENT wp);
+        [DllImport("user32.dll")] public static extern bool SetWindowPlacement(IntPtr hwnd, ref WINDOWPLACEMENT wp);
         [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out RECT value, int size);
         [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out int value, int size);
 
@@ -266,7 +270,10 @@ namespace DshComputerUse
                 case "clipboard_get": { var d = new Dictionary<string, object>(); d["text"] = Clip.Get(); return d; }
                 case "clipboard_set": Clip.Set(Args.Str(r, "text", "")); return null;
                 case "ui": return Uia.Elements(r);
-                case "overlay_show": Overlay.ExcludeFromCapture = Args.Bool(r, "excludeFromCapture", true); Overlay.Show(Args.Str(r, "label", ""), Args.Str(r, "status", ""), Args.Bool(r, "glow", true)); return null;
+                case "overlay_show": Overlay.ExcludeFromCapture = Args.Bool(r, "excludeFromCapture", true); Overlay.Show(r); return null;
+                case "overlay_pause": Overlay.SetPaused(Args.Bool(r, "paused", false)); return null;
+                case "window_card": return Windows.Card(new IntPtr(Convert.ToInt64(r["hwnd"])), Args.Int(r, "x", 0), Args.Int(r, "y", 0), Args.Int(r, "width", 0), Args.Int(r, "height", 0));
+                case "window_uncard": return Windows.Uncard(new IntPtr(Convert.ToInt64(r["hwnd"])));
                 case "overlay_status": Overlay.Status(Args.Str(r, "status", "")); return null;
                 case "overlay_hide": Overlay.Hide(); return null;
                 default: throw new Exception("unknown command: " + cmd);
@@ -566,6 +573,7 @@ namespace DshComputerUse
 
         public static void Set(string text)
         {
+            if (!string.IsNullOrEmpty(text)) text = text.Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", "\r\n");
             for (int i = 0; i < 5; i++)
             {
                 try
@@ -716,6 +724,51 @@ namespace DshComputerUse
             return d;
         }
 
+        static readonly Dictionary<long, Native.WINDOWPLACEMENT> cards = new Dictionary<long, Native.WINDOWPLACEMENT>();
+
+        /// Shrink a window into an always-on-top card; Uncard restores it exactly.
+        public static object Card(IntPtr hwnd, int x, int y, int w, int h)
+        {
+            if (!Native.IsWindow(hwnd)) throw new Exception("window no longer exists");
+            if (!cards.ContainsKey(hwnd.ToInt64()))
+            {
+                var wp = new Native.WINDOWPLACEMENT();
+                wp.length = Marshal.SizeOf(typeof(Native.WINDOWPLACEMENT));
+                Native.GetWindowPlacement(hwnd, ref wp);
+                cards[hwnd.ToInt64()] = wp;
+            }
+            // A minimized window restores to its previous state, which may be maximized: restore until normal.
+            for (int i = 0; i < 2 && (Native.IsIconic(hwnd) || Native.IsZoomed(hwnd)); i++) { Native.ShowWindow(hwnd, 9); Thread.Sleep(150); }
+            Native.SetWindowPos(hwnd, new IntPtr(-1), x, y, w, h, 0x0010 | 0x0040); // TOPMOST, NOACTIVATE | SHOWWINDOW
+            // Apps enforce a minimum size (Electron does): keep the card anchored bottom-right.
+            Native.RECT rc;
+            if (Native.GetWindowRect(hwnd, out rc) && (rc.Right - rc.Left != w || rc.Bottom - rc.Top != h))
+            {
+                int nx = x + w - (rc.Right - rc.Left), ny = y + h - (rc.Bottom - rc.Top);
+                Native.SetWindowPos(hwnd, new IntPtr(-1), nx, ny, 0, 0, 0x0001 | 0x0010); // NOSIZE | NOACTIVATE
+            }
+            return Describe(hwnd);
+        }
+
+        public static object Uncard(IntPtr hwnd)
+        {
+            Native.WINDOWPLACEMENT wp;
+            bool known = cards.TryGetValue(hwnd.ToInt64(), out wp);
+            cards.Remove(hwnd.ToInt64());
+            if (!Native.IsWindow(hwnd)) return null;
+            Native.SetWindowPos(hwnd, new IntPtr(-2), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010); // NOTOPMOST
+            if (known)
+            {
+                // Restore the normal rectangle first, then the original show state (maximized etc.).
+                int show = wp.showCmd;
+                wp.showCmd = 1; // SW_SHOWNORMAL
+                Native.SetWindowPlacement(hwnd, ref wp);
+                if (show == 3) Native.ShowWindow(hwnd, 3);
+                else if (show == 2) Native.ShowWindow(hwnd, 6);
+            }
+            return Describe(hwnd);
+        }
+
         public static object Command(IntPtr hwnd, string op)
         {
             if (!Native.IsWindow(hwnd)) throw new Exception("window no longer exists");
@@ -753,6 +806,17 @@ namespace DshComputerUse
                 }
             }
             finally { Marshal.FinalReleaseComObject(shell); }
+            // Desktop shortcuts too: portable apps often only live there.
+            foreach (var folder in new[] { Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory) })
+            {
+                try
+                {
+                    if (folder.Length == 0 || !Directory.Exists(folder)) continue;
+                    foreach (var f in Directory.GetFiles(folder, "*.lnk"))
+                        list.Add(new KeyValuePair<string, string>(Path.GetFileNameWithoutExtension(f), "lnk:" + f));
+                }
+                catch (Exception) { }
+            }
             cache = list; cachedAt = DateTime.UtcNow;
             return list;
         }
@@ -785,7 +849,8 @@ namespace DshComputerUse
             string target = Args.Str(r, "target", "");
             string args = Args.Str(r, "args", "");
             ProcessStartInfo psi;
-            if (appId.Length > 0) psi = new ProcessStartInfo("explorer.exe", "shell:AppsFolder\\" + appId);
+            if (appId.StartsWith("lnk:")) psi = new ProcessStartInfo(appId.Substring(4));
+            else if (appId.Length > 0) psi = new ProcessStartInfo("explorer.exe", "shell:AppsFolder\\" + appId);
             else { psi = new ProcessStartInfo(target); if (args.Length > 0) psi.Arguments = args; }
             psi.UseShellExecute = true;
             using (var p = Process.Start(psi)) { }
@@ -958,15 +1023,21 @@ namespace DshComputerUse
         static Control invoker;
         static readonly List<LayeredForm> glows = new List<LayeredForm>();
         static LayeredForm pill;
-        static Rectangle pillRect, stopRect, pillDisplay;
+        static Rectangle pillRect;
+        static readonly List<KeyValuePair<Rectangle, string>> buttons = new List<KeyValuePair<Rectangle, string>>();
         static bool pillAtBottom;
-        static string label = "", status = "";
-        static float pillScale = 1f;
+        static string label = "", status = "", rendered = "";
+        static Image icon;
+        static string iconPath = "";
+        static int idleMs = 1500;
         static System.Windows.Forms.Timer timer;
         static DateTime shownAt;
         static IntPtr hook = IntPtr.Zero;
         static Native.LowLevelKeyboardProc hookProc;
         static volatile bool visible;
+        static volatile bool paused;
+        static int lastTyping = int.MinValue / 2;
+        static int lastEmit;
         static readonly object RectLock = new object();
 
         static void Ensure()
@@ -991,17 +1062,32 @@ namespace DshComputerUse
 
         static void Ui(MethodInvoker action) { invoker.Invoke(action); }
 
-        public static void Show(string newLabel, string newStatus, bool glow)
+        public static void Show(Dictionary<string, object> r)
         {
             Ensure();
             Ui(delegate
             {
-                label = newLabel; status = newStatus;
+                label = Args.Str(r, "label", "");
+                status = Args.Str(r, "status", "");
+                idleMs = Args.Int(r, "idleMs", 1500);
+                string path = Args.Str(r, "icon", "");
+                if (path != iconPath)
+                {
+                    iconPath = path;
+                    if (icon != null) { icon.Dispose(); icon = null; }
+                    try
+                    {
+                        if (path.Length > 0 && File.Exists(path))
+                            using (var raw = Image.FromFile(path)) icon = new Bitmap(raw);
+                    }
+                    catch (Exception) { icon = null; }
+                }
                 if (visible) { RenderPill(); return; }
                 pillAtBottom = false;
+                paused = false;
                 foreach (var g in glows) g.Close();
                 glows.Clear();
-                if (glow)
+                if (Args.Bool(r, "glow", true))
                 {
                     foreach (Dictionary<string, object> d in Screen2.Displays())
                     {
@@ -1017,7 +1103,8 @@ namespace DshComputerUse
                     pill = new LayeredForm(false);
                     pill.MouseUp += delegate (object s, MouseEventArgs e)
                     {
-                        if (stopRect.Contains(e.Location)) { Program.EmitEvent("stop", "button"); }
+                        foreach (var b in buttons)
+                            if (b.Key.Contains(e.Location)) { Press(b.Value); break; }
                     };
                     pill.Show();
                 }
@@ -1035,16 +1122,24 @@ namespace DshComputerUse
             Ui(delegate { status = newStatus; RenderPill(); });
         }
 
+        public static void SetPaused(bool value)
+        {
+            if (thread == null) return;
+            Ui(delegate { paused = value; RenderPill(); });
+        }
+
         public static void Hide()
         {
             if (thread == null) return;
             Ui(delegate
             {
                 visible = false;
+                paused = false;
                 timer.Stop();
                 foreach (var g in glows) g.Close();
                 glows.Clear();
                 if (pill != null) { pill.Close(); pill = null; }
+                rendered = "";
                 lock (RectLock) pillRect = Rectangle.Empty;
                 RemoveHook();
             });
@@ -1069,14 +1164,26 @@ namespace DshComputerUse
             Thread.Sleep(30);
         }
 
+        // pause / resume / stop, from Esc or the pill buttons.
+        static void Press(string action)
+        {
+            if (action == "stop") { paused = false; Program.EmitEvent("stop", "button"); }
+            else if (action == "pause") { paused = true; Program.EmitEvent("pause", "user"); }
+            else if (action == "resume") { paused = false; Program.EmitEvent("resume", "user"); }
+            RenderPill();
+        }
+
+        static bool Typing() { return unchecked(Environment.TickCount - lastTyping) < idleMs; }
+
         static void Tick()
         {
             if (!visible) return;
             double t = (DateTime.UtcNow - shownAt).TotalSeconds;
             double fadeIn = Math.Min(1.0, t / 0.35);
-            double breathe = 0.72 + 0.28 * (0.5 + 0.5 * Math.Sin(t * Math.PI * 2 / 2.6));
+            double breathe = paused ? 0.55 : 0.72 + 0.28 * (0.5 + 0.5 * Math.Sin(t * Math.PI * 2 / 2.6));
             byte alpha = (byte)Math.Max(0, Math.Min(255, 255 * fadeIn * breathe));
             foreach (var g in glows) g.SetAlpha(alpha);
+            if (Key() != rendered) RenderPill(); // typing started or stopped
             if ((int)(t * 25) % 50 == 0)
             {
                 foreach (var g in glows) g.KeepOnTop();
@@ -1121,31 +1228,25 @@ namespace DshComputerUse
             return p;
         }
 
-        static readonly Color Whale = Color.FromArgb(77, 107, 254); // DeepSeek blue #4D6BFE
-
-        /// A whale facing left, drawn in a 24x24 design box scaled to `size`.
-        static void DrawWhale(Graphics g, float x, float y, float size, Color eye)
+        // What the pill should say right now; it is re-rendered whenever this changes.
+        static void Content(out string main, out string sub, out string[] actions, out string[] captions)
         {
-            float k = size / 24f;
-            Func<float, float, PointF> P = delegate (float px, float py) { return new PointF(x + px * k, y + py * k); };
-            using (var path = new GraphicsPath())
+            if (paused)
             {
-                path.AddBezier(P(1f, 14f), P(1f, 9f), P(5.5f, 6.5f), P(10f, 7.2f));
-                path.AddBezier(P(10f, 7.2f), P(14f, 7.8f), P(16.5f, 10f), P(18f, 10.5f));
-                path.AddBezier(P(18f, 10.5f), P(19.5f, 9f), P(20f, 6f), P(19.2f, 3.5f));
-                path.AddBezier(P(19.2f, 3.5f), P(21.5f, 4.5f), P(23f, 3.8f), P(23.5f, 2.5f));
-                path.AddBezier(P(23.5f, 2.5f), P(23.8f, 6f), P(22.5f, 9.5f), P(19.5f, 13f));
-                path.AddBezier(P(19.5f, 13f), P(17.5f, 17.5f), P(13f, 19.5f), P(8.5f, 19.3f));
-                path.AddBezier(P(8.5f, 19.3f), P(4f, 19f), P(1f, 17.5f), P(1f, 14f));
-                path.CloseFigure();
-                using (var brush = new SolidBrush(Whale)) g.FillPath(brush, path);
+                main = "已暂停"; sub = "按 Esc 继续";
+                actions = new[] { "resume", "stop" }; captions = new[] { "继续", "停止" };
+                return;
             }
-            using (var pen = new Pen(Color.FromArgb(150, eye), Math.Max(1f, 1.1f * k)))
-            {
-                pen.StartCap = LineCap.Round; pen.EndCap = LineCap.Round;
-                g.DrawBezier(pen, P(2.6f, 15.4f), P(6f, 17.2f), P(10.5f, 17.2f), P(14f, 15.6f)); // belly line
-            }
-            using (var brush = new SolidBrush(eye)) g.FillEllipse(brush, x + 4.6f * k, y + 11f * k, 2.2f * k, 2.2f * k);
+            main = label;
+            sub = Typing() ? "你正在操作，已暂停" : status.Length > 0 ? status : "Esc 暂停";
+            actions = new[] { "stop" }; captions = new[] { "停止" };
+        }
+
+        static string Key()
+        {
+            string main, sub; string[] actions, captions;
+            Content(out main, out sub, out actions, out captions);
+            return main + "|" + sub + "|" + string.Join(",", actions) + "|" + pillAtBottom;
         }
 
         static void RenderPill()
@@ -1161,10 +1262,11 @@ namespace DshComputerUse
                     scale = (int)d["dpi"] / 96f;
                 }
             }
-            pillDisplay = work; pillScale = scale;
+            string main, sub; string[] actions, captions;
+            Content(out main, out sub, out actions, out captions);
+            rendered = Key();
+            if (sub.Length > 48) sub = sub.Substring(0, 47) + "…";
 
-            string main = label;
-            string hint = "Esc 停止";
             float px = 1.333f * scale; // points -> physical pixels
             using (var fMain = new Font("Microsoft YaHei UI", 10f * px, FontStyle.Bold, GraphicsUnit.Pixel))
             using (var fSub = new Font("Microsoft YaHei UI", 9f * px, FontStyle.Regular, GraphicsUnit.Pixel))
@@ -1175,15 +1277,18 @@ namespace DshComputerUse
                 mg.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
                 var fmt = StringFormat.GenericTypographic;
                 fmt.FormatFlags |= StringFormatFlags.MeasureTrailingSpaces;
-                string sub = status.Length > 0 ? status : hint;
-                if (sub.Length > 48) sub = sub.Substring(0, 47) + "…";
                 SizeF mainSize = mg.MeasureString(main, fMain, 10000, fmt);
                 SizeF subSize = mg.MeasureString(sub, fSub, 10000, fmt);
-                SizeF btnSize = mg.MeasureString("停止", fBtn, 10000, fmt);
-                float pad = 16 * scale, gap = 11 * scale, icon = 20 * scale;
-                float height = 40 * scale;
-                float btnW = btnSize.Width + 22 * scale, btnH = 26 * scale;
-                float width = pad + icon + gap + mainSize.Width + gap + 1 * scale + gap + subSize.Width + gap + btnW + (pad - 7 * scale);
+                float pad = 14 * scale, gap = 11 * scale, iconSize = 24 * scale;
+                float height = 40 * scale, btnH = 26 * scale, btnGap = 6 * scale;
+                var btnSizes = new SizeF[captions.Length];
+                float btnsW = 0;
+                for (int i = 0; i < captions.Length; i++)
+                {
+                    btnSizes[i] = mg.MeasureString(captions[i], fBtn, 10000, fmt);
+                    btnsW += btnSizes[i].Width + 22 * scale + (i > 0 ? btnGap : 0);
+                }
+                float width = pad + iconSize + gap + mainSize.Width + gap + 1 * scale + gap + subSize.Width + gap + btnsW + (pad - 7 * scale);
                 int W = (int)Math.Ceiling(width), H = (int)Math.Ceiling(height);
                 int x = work.X + (work.Width - W) / 2;
                 int y = pillAtBottom ? work.Bottom - H - (int)(18 * scale) : work.Y + (int)(14 * scale);
@@ -1193,6 +1298,7 @@ namespace DshComputerUse
                 {
                     g.Clear(Color.Transparent);
                     g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                     g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
                     var body = new RectangleF(0.5f, 0.5f, W - 1, H - 1);
                     using (var path = Rounded(body, (H - 1) / 2f))
@@ -1200,19 +1306,28 @@ namespace DshComputerUse
                         using (var brush = new SolidBrush(Color.FromArgb(242, 31, 30, 29))) g.FillPath(brush, path);
                         using (var pen = new Pen(Color.FromArgb(200, Accent), Math.Max(1f, 1.2f * scale))) g.DrawPath(pen, path);
                     }
-                    DrawWhale(g, pad - 5 * scale, (H - icon - 10 * scale) / 2f, icon + 10 * scale, Color.FromArgb(31, 30, 29));
-                    float tx = pad + icon + gap;
+                    var iconRect = new RectangleF(pad, (H - iconSize) / 2f, iconSize, iconSize);
+                    if (icon != null) g.DrawImage(icon, iconRect);
+                    else using (var brush = new SolidBrush(Accent)) g.FillEllipse(brush, RectangleF.Inflate(iconRect, -5 * scale, -5 * scale));
+                    float tx = pad + iconSize + gap;
                     using (var b = new SolidBrush(Color.FromArgb(250, 250, 249))) g.DrawString(main, fMain, b, tx, (H - mainSize.Height) / 2f, fmt);
                     tx += mainSize.Width + gap;
                     using (var pen = new Pen(Color.FromArgb(90, 255, 255, 255), Math.Max(1f, scale))) g.DrawLine(pen, tx, H * 0.3f, tx, H * 0.7f);
                     tx += 1 * scale + gap;
                     using (var b = new SolidBrush(Color.FromArgb(175, 172, 168))) g.DrawString(sub, fSub, b, tx, (H - subSize.Height) / 2f, fmt);
                     tx += subSize.Width + gap;
-                    var btn = new RectangleF(tx, (H - btnH) / 2f, btnW, btnH);
-                    using (var path = Rounded(btn, btnH / 2f))
-                    using (var brush = new SolidBrush(Accent)) g.FillPath(brush, path);
-                    using (var b = new SolidBrush(Color.White)) g.DrawString("停止", fBtn, b, btn.X + (btnW - btnSize.Width) / 2f, btn.Y + (btnH - btnSize.Height) / 2f, fmt);
-                    stopRect = Rectangle.Round(btn);
+                    buttons.Clear();
+                    for (int i = 0; i < captions.Length; i++)
+                    {
+                        float bw = btnSizes[i].Width + 22 * scale;
+                        var btn = new RectangleF(tx, (H - btnH) / 2f, bw, btnH);
+                        bool primary = i == 0;
+                        using (var path = Rounded(btn, btnH / 2f))
+                        using (var brush = new SolidBrush(primary ? Accent : Color.FromArgb(70, 68, 66))) g.FillPath(brush, path);
+                        using (var b = new SolidBrush(Color.White)) g.DrawString(captions[i], fBtn, b, btn.X + (bw - btnSizes[i].Width) / 2f, btn.Y + (btnH - btnSizes[i].Height) / 2f, fmt);
+                        buttons.Add(new KeyValuePair<Rectangle, string>(Rectangle.Round(btn), actions[i]));
+                        tx += bw + btnGap;
+                    }
                     pill.SetBitmap(bmp, new Rectangle(x, y, W, H), 255);
                 }
                 lock (RectLock) pillRect = new Rectangle(x, y, W, H);
@@ -1234,23 +1349,30 @@ namespace DshComputerUse
             hook = IntPtr.Zero;
         }
 
-        static long lastTyping;
-
         static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
-            if (nCode >= 0 && visible && (wParam.ToInt32() == 0x100 || wParam.ToInt32() == 0x104))
+            if (nCode >= 0 && visible)
             {
+                int msg = wParam.ToInt32();
                 var kb = (Native.KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(Native.KBDLLHOOKSTRUCT));
                 // Only physical keys count: our own SendInput sets LLKHF_INJECTED (0x10).
                 if ((kb.flags & 0x10) == 0)
                 {
-                    if (kb.vkCode == 0x1B) Program.EmitEvent("stop", "esc");
-                    else
+                    bool down = msg == 0x100 || msg == 0x104;
+                    if (kb.vkCode == 0x1B)
                     {
-                        // The user is typing: let the host pause. Throttled; mouse
-                        // movement is deliberately ignored (too easy to nudge).
-                        long now = Environment.TickCount;
-                        if (now - lastTyping > 250) { lastTyping = now; Program.EmitEvent("user_input", "keyboard"); }
+                        // Esc toggles pause and is swallowed, so the focused app
+                        // (DeepSeek Harness included) never turns it into "stop".
+                        if (down) invoker.BeginInvoke((MethodInvoker)delegate { Press(paused ? "resume" : "pause"); });
+                        return new IntPtr(1);
+                    }
+                    if (down)
+                    {
+                        // The user is typing: the host waits. Mouse movement is
+                        // deliberately ignored (too easy to nudge).
+                        int now = Environment.TickCount;
+                        lastTyping = now;
+                        if (unchecked(now - lastEmit) > 250) { lastEmit = now; Program.EmitEvent("user_input", "keyboard"); }
                     }
                 }
             }

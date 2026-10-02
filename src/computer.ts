@@ -8,14 +8,14 @@ import type { AccessControl, AccessMode, WindowLike } from './access.js'
 import { contains, regionToPhysical, screenshotSize, toPhysical, toScreenshot, type Display, type Point, type Size } from './coords.js'
 import type { HelperLike } from './helper-client.js'
 import { parseKeys, parseModifiers } from './keys.js'
-import type { CancellableAgent, OverlayController } from './overlay.js'
+import type { CancellableAgent, HostWindowMode, OverlayController } from './overlay.js'
 
 export interface Settings {
   accessMode: AccessMode
   blockedApps: string[]
   overlay: boolean
   overlayLabel: string
-  minimizeHostWindow: boolean
+  hostWindow: HostWindowMode
   maxLongEdge: number
   maxPixels: number
   jpegQuality: number
@@ -270,11 +270,13 @@ export class Computer {
     await this.overlay.begin(call.agent, Computer.statusOf(input))
     const { action } = input
     const s = this.settings()
-    if (s.pauseOnUserInput && INPUT.has(action) && await this.overlay.waitForUserIdle(call.signal, s.userIdleMs)) {
+    const wasPaused = this.overlay.paused
+    if (await this.overlay.yieldToUser(call.signal, s.pauseOnUserInput && INPUT.has(action)) && INPUT.has(action)) {
       // The screen may have changed under the model's feet: re-plan from a fresh look.
       await this.overlay.begin(call.agent, Computer.statusOf(input))
+      const why = wasPaused ? 'the user paused computer use (Esc) and has now resumed' : 'the user was typing on the keyboard, so you were paused until they stopped'
       return {
-        text: `Not done: the user was typing on the keyboard, so you were paused until they stopped. ${action} was NOT performed. Look at the new screenshot and re-plan before acting.`,
+        text: `Not done: ${why}. ${action} was NOT performed. Look at the new screenshot and re-plan before acting.`,
         ...(call.vision ? { image: await this.screenshot() } : {}),
         skipped: true,
       }
@@ -282,6 +284,7 @@ export class Computer {
     if (s.pauseOnUserInput && INPUT.has(action)) {
       const changed = await this.foregroundChanged()
       if (changed) {
+        await this.overlay.status('检测到窗口切换，重新查看屏幕')
         const image = call.vision ? await this.screenshot() : undefined
         if (!image) this.seen = changed
         return {

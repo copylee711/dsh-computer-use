@@ -91,7 +91,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     description: 'Control the Windows desktop with the mouse and keyboard, like a person. Coordinates are pixels of the latest screenshot (the plugin handles DPI and scaling). Clicks, typing, keys and scrolls return a fresh screenshot automatically, so do not call screenshot again right after. Prefer keyboard shortcuts when they are reliable. zoom shows a region at full resolution for small text.',
     parameters: actionProperties,
     output,
-    timeoutMs: 120_000,
+    timeoutMs: 30 * 60_000, // a user pause (Esc) holds the call
     async execute(args, exec): Promise<Value> {
       const call = await host.context(exec)
       const input = args as ActionInput
@@ -121,7 +121,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       },
     },
     output,
-    timeoutMs: 300_000,
+    timeoutMs: 30 * 60_000,
     async execute(args, exec): Promise<Value> {
       const call = await host.context(exec)
       const actions = (args as { actions: ActionInput[] }).actions
@@ -166,7 +166,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       name: { type: 'string', required: true, description: 'App name as shown in the Start menu, an executable path, or an http(s) URL.' },
     },
     output,
-    timeoutMs: 60_000,
+    timeoutMs: 30 * 60_000,
     async execute(args, exec): Promise<Value> {
       const call = await host.context(exec)
       const name = String((args as { name: string }).name ?? '').trim()
@@ -180,6 +180,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
         }
       }
       await computer.overlay.begin(call.agent, `打开 ${name}`)
+      await computer.overlay.yieldToUser(call.signal, false)
       const before = await computer.foreground()
       let how: string
       const running = isUrl ? undefined : (await computer.windows()).find(win => !isHostWindow(win) && appMatches(name, win))
@@ -236,6 +237,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       const denial = computer.access.denial(call.session, target, settings.accessMode, settings.blockedApps, action)
       if (denial && !(action === 'minimize' && isHostWindow(target))) throw new Error(denial)
       await computer.overlay.begin(call.agent, `窗口 ${action}`)
+      await computer.overlay.yieldToUser(call.signal, false)
       let text: string
       if (action === 'focus') {
         const result = await computer.focus(target)

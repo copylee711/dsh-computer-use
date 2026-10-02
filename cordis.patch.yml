@@ -1,0 +1,4 @@
+- insert:
+    - id: copylee-computer-use
+      name: '@copylee/dsh-computer-use'
+      config: {}

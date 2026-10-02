@@ -72,8 +72,8 @@ export const Config: z<Config> = z.object({
     'en-US': { $description: 'Return a screenshot after every action (saves a round trip)' },
   }),
   settleMs: z.natural().max(5000).default(400).volatile().i18n({
-    'zh-CN': { $description: '操作后等待界面稳定的毫秒数，再截图' },
-    'en-US': { $description: 'Milliseconds to wait after an action before the screenshot' },
+    'zh-CN': { $description: '操作后至少等待的毫秒数；之后画面静止即截图（最多约 2.5 秒）' },
+    'en-US': { $description: 'Minimum wait after an action; then the screenshot is taken once the screen stops changing (up to ~2.5 s)' },
   }),
   maxLongEdge: z.natural().min(640).max(3840).default(1366).volatile().i18n({
     'zh-CN': { $description: '截图最长边像素（越大越清晰、越费 token）' },
@@ -187,6 +187,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   // Hide the overlay when the controlling agent stops running.
   ctx.on('agent/status', ({ agent, status }) => {
+    if (status === 'running') computer.resetLook()
     if (status === 'idle' && overlay.controller === (agent as unknown)) void overlay.end(agent as unknown as CancellableAgent)
   })
   ctx.on('agent/disposed', ({ agent }) => {

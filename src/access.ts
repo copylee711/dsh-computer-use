@@ -46,6 +46,19 @@ function exeBase(win: WindowLike): string {
   return normalizeApp(win.exe.split(/[\\/]/).pop() ?? '')
 }
 
+/** Executable names an app name stands for (UWP's shared frame host excluded). */
+function exeNames(name: string): Set<string> {
+  const n = normalizeApp(name)
+  return new Set([n.replace(/\s/g, ''), ...(ALIASES[n] ?? [])].filter(exe => exe !== 'applicationframehost'))
+}
+
+/** Do two app names refer to the same program ("explorer" and "文件资源管理器")? */
+export function sameApp(a: string, b: string): boolean {
+  const x = exeNames(a)
+  for (const exe of exeNames(b)) if (x.has(exe)) return true
+  return false
+}
+
 export function isHostWindow(win: WindowLike): boolean {
   return HOST_EXES.includes(win.exe.toLowerCase())
 }
@@ -91,10 +104,10 @@ export class AccessControl {
     return this.granted(session).some(name => appMatches(name, win))
   }
 
-  /** Names from `names` the session has not been granted yet. */
+  /** Names from `names` the session has not been granted yet (aliases count). */
   missing(session: string, names: readonly string[]): string[] {
     const set = this.grants.get(session) ?? new Set<string>()
-    return names.filter(name => !set.has(normalizeApp(name)))
+    return names.filter(name => !set.has(normalizeApp(name)) && ![...set].some(granted => sameApp(granted, name)))
   }
 
   forget(session: string): void {

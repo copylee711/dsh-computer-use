@@ -88,7 +88,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
 
   tools.push(defineTool({
     name: 'computer',
-    description: 'Control the Windows desktop with the mouse and keyboard, like a person. Coordinates are pixels of the latest screenshot (the plugin handles DPI and scaling). Clicks, typing, keys and scrolls return a fresh screenshot automatically, so do not call screenshot again right after. Prefer keyboard shortcuts when they are reliable. zoom shows a region at full resolution for small text.',
+    description: 'Control the Windows desktop with the mouse and keyboard, like a person. Coordinates are pixels of the latest screenshot (the plugin handles DPI and scaling). Clicks, typing, keys, scrolls and wait return a fresh screenshot automatically (taken once the screen settles), so do not call screenshot again right after. Prefer keyboard shortcuts when they are reliable. zoom shows a region at full resolution for small text.',
     parameters: actionProperties,
     output,
     timeoutMs: 30 * 60_000, // a user pause (Esc) holds the call
@@ -149,7 +149,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       }
       const done = lines.join('\n')
       const shot = call.vision && computer.settings().autoScreenshot
-        ? await sleep(computer.settings().settleMs, undefined, { signal: call.signal }).then(() => computer.screenshot())
+        ? await computer.settle(call.signal).then(() => computer.screenshot())
         : undefined
       const summary = failure === undefined
         ? `All ${actions.length} actions done.\n${done}`
@@ -173,39 +173,43 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       if (name === '') throw new Error('name is required.')
       const settings = computer.settings()
       const isUrl = /^https?:\/\//i.test(name)
-      if (settings.accessMode === 'per-app' && !isUrl && computer.access.missing(call.session, [name]).length > 0) {
-        const running = (await computer.windows()).find(win => appMatches(name, win))
+      // ms-settings:display and friends open the Settings app.
+      const appName = /^ms-settings:/i.test(name) ? '设置' : name
+      if (settings.accessMode === 'per-app' && !isUrl && computer.access.missing(call.session, [appName]).length > 0) {
+        const running = (await computer.windows()).find(win => appMatches(appName, win))
         if (!running || !computer.access.isGranted(call.session, running)) {
-          throw new Error(`"${name}" is not granted for this session. Call request_access with ["${name}"] first.`)
+          throw new Error(`"${appName}" is not granted for this session. Call request_access with ["${appName}"] first.`)
         }
       }
       await computer.overlay.begin(call.agent, `打开 ${name}`)
       await computer.overlay.yieldToUser(call.signal, false)
       const before = await computer.foreground()
       let how: string
-      const running = isUrl ? undefined : (await computer.windows()).find(win => !isHostWindow(win) && appMatches(name, win))
+      const isUri = isUrl || /^[a-z][a-z0-9+.-]+:(?![\/])/i.test(name)
+      const running = isUri ? undefined : (await computer.windows()).find(win => !isHostWindow(win) && appMatches(name, win))
       if (running) {
         const result = await computer.focus(running)
         how = result.focused ? `Brought ${running.exe} ("${running.title.slice(0, 60)}") to the front.` : `Tried to bring ${running.exe} to the front, but Windows kept another window focused.`
       } else {
-        const apps = isUrl ? [] : await computer.helper.call<Array<{ name: string; id: string }>>('apps', { query: name, limit: 5 }, 30_000)
+        const apps = isUri ? [] : await computer.helper.call<Array<{ name: string; id: string }>>('apps', { query: name, limit: 5 }, 30_000)
         const app = apps[0]
         if (app) await computer.helper.call('launch', { appId: app.id })
         else await computer.helper.call('launch', { target: name })
         how = app ? `Launched "${app.name}".` : isUrl ? `Opened ${name} in the default browser.` : `Started "${name}".`
-        // Wait for the new window to take the foreground.
+        // Wait for the new window to take the foreground. Explorer's desktop and
+        // taskbar do not count, but a File Explorer window (CabinetWClass) does.
         for (let i = 0; i < 32; i++) {
           await sleep(250, undefined, { signal: call.signal })
           const now = await computer.foreground()
-          if (now && now.hwnd !== before?.hwnd && !isHostWindow(now) && now.exe.toLowerCase() !== 'explorer.exe') break
+          if (now && now.hwnd !== before?.hwnd && !isHostWindow(now) && (now.exe.toLowerCase() !== 'explorer.exe' || now.className === 'CabinetWClass')) break
         }
       }
       const fg = await computer.foreground()
       // The user approved this app by name; remember which executable it turned out to be.
-      if (fg && !isHostWindow(fg) && settings.accessMode === 'per-app' && (computer.access.missing(call.session, [name]).length === 0 || isUrl)) {
+      if (fg && !isHostWindow(fg) && settings.accessMode === 'per-app' && (computer.access.missing(call.session, [appName]).length === 0 || isUrl)) {
         computer.access.grant(call.session, [fg.exe])
       }
-      await sleep(settings.settleMs, undefined, { signal: call.signal })
+      await computer.settle(call.signal)
       const shot = call.vision ? await computer.screenshot() : undefined
       return withShot(host, `${how} ${await computer.describeForeground()}`, shot, call)
     },

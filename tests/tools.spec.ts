@@ -211,7 +211,66 @@ describe('foreground takeover', () => {
   })
 })
 
+describe('fewer round trips', () => {
+  it('returns a screenshot after wait', async () => {
+    const t = setup()
+    const value = await t.run('computer', { action: 'wait', duration: 0 })
+    expect(value.image).toBeDefined()
+    expect(t.helper.calls.some(c => c.cmd === 'settle')).toBe(false)
+  })
+
+  it('waits for the screen to settle before the post-action screenshot', async () => {
+    const t = setup({ mode: 'allow-all' })
+    await t.run('computer', { action: 'key', text: 'Return' })
+    const cmds = t.helper.calls.map(c => c.cmd)
+    expect(cmds.lastIndexOf('settle')).toBeGreaterThan(cmds.indexOf('keys'))
+    expect(cmds.lastIndexOf('screenshot')).toBeGreaterThan(cmds.lastIndexOf('settle'))
+  })
+
+  it('puts the working window back when the user clicked into the DSH card', async () => {
+    const t = setup({ mode: 'allow-all' })
+    await t.run('computer', { action: 'screenshot' }) // Chrome in front
+    t.helper.foreground = HOST
+    const original = t.helper.call.bind(t.helper)
+    t.helper.call = async <T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> => {
+      if (cmd === 'focus') { t.helper.foreground = CHROME; return { ...CHROME, focused: true } as T }
+      return original<T>(cmd, args)
+    }
+    const value = await t.run('computer', { action: 'key', text: 'ctrl+t' })
+    expect(value.text).toMatch(/Pressed ctrl\+t/)
+    expect(t.helper.calls.find(c => c.cmd === 'keys')).toBeDefined()
+  })
+})
+
 describe('floating card', () => {
+  it('moves the card to the other corner when the agent points under it', async () => {
+    const helper = new FakeHelper()
+    const display = { x: 0, y: 0, width: 2560, height: 1600, workX: 0, workY: 0, workWidth: 2560, workHeight: 1520, primary: true, dpi: 192, name: 'D1' }
+    const card = { ...HOST, x: 1500, y: 400, width: 1028, height: 1088, foreground: true }
+    const original = helper.call.bind(helper)
+    helper.call = async <T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> => {
+      if (cmd === 'displays') { helper.calls.push({ cmd, args }); return [display] as T }
+      if (cmd === 'windows') { helper.calls.push({ cmd, args }); return [CHROME, card] as T }
+      if (cmd === 'window_at') {
+        helper.calls.push({ cmd, args })
+        const x = Number(args.x)
+        return (x >= card.x && x < card.x + card.width ? card : CHROME) as T
+      }
+      if (cmd === 'window_card') { card.x = Number(args.x) }
+      return original<T>(cmd, args)
+    }
+    const settings = { ...SETTINGS, accessMode: 'allow-all' as const, hostWindow: 'card' as const }
+    const overlay = new OverlayController(helper, () => settings, () => {})
+    const computer = new Computer(helper, new AccessControl(), overlay, () => settings)
+    const call = { session: 's1', agent: undefined, signal: new AbortController().signal, vision: false }
+    await computer.run({ action: 'screenshot' }, call)
+    expect(card.x).toBeGreaterThan(1000) // carded bottom-right
+    await computer.run({ action: 'left_click', coordinate: [1200, 700] }, call) // under the card
+    expect(card.x).toBeLessThan(100)
+    const click = helper.calls.find(c => c.cmd === 'click')!
+    expect(click).toBeDefined()
+  })
+
   it('fits a bottom-right card inside the work area', () => {
     const r = cardRect({ x: 0, y: 0, width: 2560, height: 1600, workX: 0, workY: 0, workWidth: 2560, workHeight: 1504, primary: true, dpi: 192 })
     expect(r.x + r.width).toBeLessThanOrEqual(2560)

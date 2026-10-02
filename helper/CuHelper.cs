@@ -250,6 +250,7 @@ namespace DshComputerUse
                 case "ping": { var d = new Dictionary<string, object>(); d["version"] = Program.Version; return d; }
                 case "displays": return Screen2.Displays();
                 case "screenshot": return Screen2.Capture(r);
+                case "settle": return Screen2.Settle(r);
                 case "cursor": { Native.POINT p; Native.GetCursorPos(out p); return Pt(p.X, p.Y); }
                 case "move": Overlay.Dodge(Args.Int(r, "x", 0), Args.Int(r, "y", 0)); Input.Move(Args.Int(r, "x", 0), Args.Int(r, "y", 0)); return null;
                 case "click": return Input.Click(r);
@@ -309,6 +310,75 @@ namespace DshComputerUse
             Native.EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, cb, IntPtr.Zero);
             GC.KeepAlive(cb);
             return list;
+        }
+
+        /** Sample every 8th pixel of a screen rectangle (BGR bytes). */
+        static byte[] Sample(int x, int y, int w, int h)
+        {
+            using (var bmp = new Bitmap(w, h, PixelFormat.Format24bppRgb))
+            {
+                using (var g = Graphics.FromImage(bmp))
+                {
+                    IntPtr dst = g.GetHdc();
+                    IntPtr src = Native.GetDC(IntPtr.Zero);
+                    try { Native.BitBlt(dst, 0, 0, w, h, src, x, y, 0x00CC0020 | 0x40000000); }
+                    finally { Native.ReleaseDC(IntPtr.Zero, src); g.ReleaseHdc(dst); }
+                }
+                var data = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+                try
+                {
+                    int sx = (w + 7) / 8, sy = (h + 7) / 8;
+                    var row = new byte[data.Stride];
+                    var outp = new byte[sx * sy * 3];
+                    int k = 0;
+                    for (int j = 0; j < sy; j++)
+                    {
+                        Marshal.Copy(new IntPtr(data.Scan0.ToInt64() + (long)j * 8 * data.Stride), row, 0, data.Stride);
+                        for (int i = 0; i < sx; i++) { int o = i * 8 * 3; outp[k++] = row[o]; outp[k++] = row[o + 1]; outp[k++] = row[o + 2]; }
+                    }
+                    return outp;
+                }
+                finally { bmp.UnlockBits(data); }
+            }
+        }
+
+        static double Changed(byte[] a, byte[] b)
+        {
+            int n = a.Length / 3, diff = 0;
+            for (int i = 0; i < a.Length; i += 3)
+                if (Math.Abs(a[i] - b[i]) + Math.Abs(a[i + 1] - b[i + 1]) + Math.Abs(a[i + 2] - b[i + 2]) > 30) diff++;
+            return n == 0 ? 0 : (double)diff / n;
+        }
+
+        /**
+         * Wait until the screen stops changing: at least minMs, then until two
+         * consecutive samples (quietMs apart in total) differ in under 0.2% of
+         * the sampled pixels, or maxMs passes (videos, spinners).
+         */
+        public static Dictionary<string, object> Settle(Dictionary<string, object> r)
+        {
+            int x = Args.Int(r, "x", 0), y = Args.Int(r, "y", 0), w = Args.Int(r, "width", 0), h = Args.Int(r, "height", 0);
+            int minMs = Args.Int(r, "minMs", 300), maxMs = Args.Int(r, "maxMs", 2500), interval = Args.Int(r, "intervalMs", 120), quietMs = Args.Int(r, "quietMs", 240);
+            if (w <= 0 || h <= 0) throw new Exception("invalid settle rect");
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            byte[] prev = Sample(x, y, w, h);
+            long quietSince = -1;
+            bool stable = false;
+            while (true)
+            {
+                Thread.Sleep(interval);
+                byte[] cur = Sample(x, y, w, h);
+                long now = watch.ElapsedMilliseconds;
+                if (Changed(prev, cur) < 0.002) { if (quietSince < 0) quietSince = now - interval; }
+                else quietSince = -1;
+                prev = cur;
+                if (now >= minMs && quietSince >= 0 && now - quietSince >= quietMs) { stable = true; break; }
+                if (now >= maxMs) break;
+            }
+            var d = new Dictionary<string, object>();
+            d["ms"] = (int)watch.ElapsedMilliseconds;
+            d["stable"] = stable;
+            return d;
         }
 
         static ImageCodecInfo jpegCodec;
@@ -1366,13 +1436,17 @@ namespace DshComputerUse
                         if (down) invoker.BeginInvoke((MethodInvoker)delegate { Press(paused ? "resume" : "pause"); });
                         return new IntPtr(1);
                     }
-                    if (down)
+                    // Modifier-only presses (Shift to switch the IME, Ctrl, Alt, Win)
+                    // and synthetic packets are not typing.
+                    int vk = (int)kb.vkCode;
+                    bool modifier = vk == 0x10 || vk == 0x11 || vk == 0x12 || (vk >= 0xA0 && vk <= 0xA5) || vk == 0x5B || vk == 0x5C || vk == 0x14 || vk == 0xE7 || vk == 0xFF;
+                    if (down && !modifier)
                     {
                         // The user is typing: the host waits. Mouse movement is
                         // deliberately ignored (too easy to nudge).
                         int now = Environment.TickCount;
                         lastTyping = now;
-                        if (unchecked(now - lastEmit) > 250) { lastEmit = now; Program.EmitEvent("user_input", "keyboard"); }
+                        if (unchecked(now - lastEmit) > 250) { lastEmit = now; Program.EmitEvent("user_input", "vk=0x" + vk.ToString("X2")); }
                     }
                 }
             }

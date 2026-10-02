@@ -49,11 +49,15 @@ export class OverlayController {
   private visible = false
   private idleTimer: NodeJS.Timeout | undefined
   private hostWindows: Array<{ hwnd: number; mode: 'card' | 'minimize' }> = []
+  /** The floating card and the display it lives on, while carded. */
+  private card: { hwnd: number; display: DisplayRow } | undefined
   private stopping = false
   /** Paused by Esc or the pill; actions wait until resumed. */
   paused = false
   /** When the user last typed on the physical keyboard while the overlay was up (ms epoch). */
   lastUserInput = 0
+  /** Which physical key that was (helper reason, e.g. "vk=0x41"), for the log. */
+  private lastUserKey = ''
 
   constructor(
     private readonly helper: HelperLike,
@@ -66,7 +70,7 @@ export class OverlayController {
       if (event.event === 'stop') this.stop(event.reason ?? 'user')
       else if (event.event === 'pause') this.paused = true
       else if (event.event === 'resume') this.paused = false
-      else if (event.event === 'user_input') this.lastUserInput = Date.now()
+      else if (event.event === 'user_input') { this.lastUserInput = Date.now(); this.lastUserKey = event.reason ?? '' }
     })
   }
 
@@ -88,6 +92,7 @@ export class OverlayController {
     const idleMs = this.settings().userIdleMs
     const typing = (): boolean => waitForTyping && Date.now() - this.lastUserInput < idleMs
     if (!this.paused && !typing()) return false
+    if (!this.paused) this.log(`computer use waits: the user is typing (${this.lastUserKey})`)
     const started = Date.now()
     while (this.paused || typing()) {
       if (signal.aborted) throw new Error('Cancelled.')
@@ -173,14 +178,41 @@ export class OverlayController {
       if (!display) return
       await this.helper.call('window_card', { hwnd: main.hwnd, ...cardRect(display) })
       this.hostWindows = [{ hwnd: main.hwnd, mode: 'card' }]
+      this.card = { hwnd: main.hwnd, display }
     } catch (error) {
       this.log(`host window ${mode}: ${String(error)}`)
+    }
+  }
+
+  /**
+   * The agent is about to point at something under the card: move the card to
+   * the opposite bottom corner so the target is visible and clickable.
+   * Returns whether it moved.
+   */
+  async dodgeCard(point: { x: number; y: number }): Promise<boolean> {
+    const card = this.card
+    if (!card) return false
+    try {
+      const win = await this.helper.call<WindowRow | null>('window_at', { ...point })
+      if (!win || win.hwnd !== card.hwnd) return false
+      const d = card.display
+      const margin = Math.round(16 * d.dpi / 96)
+      const onRight = win.x + win.width / 2 > d.workX + d.workWidth / 2
+      // Keep the current (possibly minimum-size-enforced) size; only change the side.
+      const x = onRight ? d.workX + margin : d.workX + d.workWidth - win.width - margin
+      await this.helper.call('window_card', { hwnd: card.hwnd, x, y: win.y, width: win.width, height: win.height })
+      await new Promise(resolve => setTimeout(resolve, 120))
+      return true
+    } catch (error) {
+      this.log(`card dodge: ${String(error)}`)
+      return false
     }
   }
 
   private async restoreHost(): Promise<void> {
     const windows = this.hostWindows
     this.hostWindows = []
+    this.card = undefined
     for (const win of windows) {
       if (win.mode === 'card') await this.helper.call('window_uncard', { hwnd: win.hwnd }).catch(() => {})
       else await this.helper.call('window_cmd', { hwnd: win.hwnd, op: 'restore' }).catch(() => {})

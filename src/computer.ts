@@ -4,7 +4,7 @@
  * will receive the input, overlay status, and post-action screenshots.
  */
 import { setTimeout as sleep } from 'node:timers/promises'
-import type { AccessControl, AccessMode, WindowLike } from './access.js'
+import { isHostWindow, type AccessControl, type AccessMode, type WindowLike } from './access.js'
 import { contains, regionToPhysical, screenshotSize, toPhysical, toScreenshot, type Display, type Point, type Size } from './coords.js'
 import type { HelperLike } from './helper-client.js'
 import { parseKeys, parseModifiers } from './keys.js'
@@ -92,6 +92,12 @@ export interface ActionOutcome {
 /** Actions that wait for the user to stop typing before they run. */
 const INPUT = new Set<Action>([...MUTATING].filter(action => action !== 'mouse_move'))
 
+/** Actions whose input goes to the foreground window. */
+const KEYBOARD = new Set<Action>(['type', 'key', 'hold_key'])
+
+/** Longest adaptive wait for the screen to settle after an action. */
+export const MAX_SETTLE_MS = 2500
+
 export class Computer {
   private displays: Display[] = []
   private displayIndex = -1
@@ -140,7 +146,10 @@ export class Computer {
   private async point(coordinate: number[] | undefined, field = 'coordinate'): Promise<Point> {
     if (!Array.isArray(coordinate) || coordinate.length !== 2) throw new Error(`${field} must be [x, y] in screenshot pixels.`)
     const display = await this.display()
-    return toPhysical({ x: coordinate[0]!, y: coordinate[1]! }, display, this.shotSize(display))
+    const p = toPhysical({ x: coordinate[0]!, y: coordinate[1]! }, display, this.shotSize(display))
+    // Pointing under the DeepSeek Harness card moves the card out of the way.
+    await this.overlay.dodgeCard(p)
+    return p
   }
 
   async toModel(point: Point): Promise<Point & { offscreen: boolean }> {
@@ -161,6 +170,13 @@ export class Computer {
 
   /** The foreground window as of the model's latest look at the screen. */
   private seen: WindowInfo | undefined
+  /** The latest foreground window that was not DeepSeek Harness itself. */
+  private lastTarget: WindowInfo | undefined
+
+  /** A new turn starts: the user may have rearranged things while chatting. */
+  resetLook(): void {
+    this.seen = undefined
+  }
 
   private async remember(): Promise<void> {
     this.seen = await this.foreground().catch(() => undefined)
@@ -198,8 +214,35 @@ export class Computer {
   // ---------------------------------------------------------------- state
 
   async foreground(): Promise<WindowInfo | undefined> {
-    const win = await this.helper.call<Partial<WindowInfo>>('foreground')
-    return typeof win.hwnd === 'number' ? win as WindowInfo : undefined
+    const win = await this.helper.call<Partial<WindowInfo> | null>('foreground')
+    if (!win || typeof win.hwnd !== 'number') return undefined
+    if (!isHostWindow(win as WindowInfo)) this.lastTarget = win as WindowInfo
+    return win as WindowInfo
+  }
+
+  /**
+   * The user clicked into the DeepSeek Harness card (to read or scroll the
+   * chat): keys would go there. Put the window the agent was working in back
+   * in front instead of refusing.
+   */
+  private async refocusFromHost(): Promise<void> {
+    const target = this.lastTarget
+    const fg = await this.foreground().catch(() => undefined)
+    if (!fg || !isHostWindow(fg) || !target || target.hwnd === fg.hwnd) return
+    const result = await this.focus(target).catch(() => undefined)
+    if (result?.focused) await sleep(80)
+  }
+
+  /** Wait until the screen stops changing (bounded), instead of a fixed delay. */
+  async settle(signal: AbortSignal): Promise<void> {
+    const s = this.settings()
+    const display = await this.display()
+    const result = await this.helper.call<{ ms: number } | null>('settle', {
+      x: display.x, y: display.y, width: display.width, height: display.height,
+      minMs: s.settleMs, maxMs: Math.max(s.settleMs, MAX_SETTLE_MS),
+    }, 15_000).catch(() => null)
+    if (result === null) await sleep(s.settleMs, undefined, { signal })
+    if (signal.aborted) throw new Error('Cancelled.')
   }
 
   async windowAt(point: Point): Promise<WindowInfo | undefined> {
@@ -283,7 +326,8 @@ export class Computer {
     }
     if (s.pauseOnUserInput && INPUT.has(action)) {
       const changed = await this.foregroundChanged()
-      if (changed) {
+      // Clicking into the DeepSeek Harness card is the user reading the chat, not a new task.
+      if (changed && !isHostWindow(changed)) {
         await this.overlay.status('检测到窗口切换，重新查看屏幕')
         const image = call.vision ? await this.screenshot() : undefined
         if (!image) this.seen = changed
@@ -296,6 +340,7 @@ export class Computer {
     }
     // From here the agent itself may change the foreground; only a new look re-arms the check.
     if (INPUT.has(action)) this.seen = undefined
+    if (KEYBOARD.has(action)) await this.refocusFromHost()
     switch (action) {
       case 'screenshot': {
         const shot = await this.screenshot()
@@ -385,12 +430,17 @@ export class Computer {
     await this.helper.call('button', { button: 'left', up: true }).catch(() => {})
   }
 
-  /** After a mutating action: settle, then capture (vision models only). */
+  /**
+   * After a mutating action: wait for the screen to settle, then capture
+   * (vision models only). A wait already waited, so it is captured at once:
+   * "wait, then look" should be one step, not two.
+   */
   async after(inputs: readonly ActionInput[], call: CallContext): Promise<Shot | undefined> {
     const s = this.settings()
     if (!s.autoScreenshot || !call.vision) return undefined
-    if (!inputs.some(input => MUTATING.has(input.action))) return undefined
-    await sleep(s.settleMs, undefined, { signal: call.signal })
+    const mutating = inputs.some(input => MUTATING.has(input.action))
+    if (!mutating && !inputs.some(input => input.action === 'wait')) return undefined
+    if (mutating) await this.settle(call.signal)
     return this.screenshot()
   }
 

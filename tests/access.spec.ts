@@ -46,4 +46,12 @@ describe('access control', () => {
     access.grant('s1', ['Chrome.exe'])
     expect(access.missing('s1', ['chrome', '记事本'])).toEqual(['记事本'])
   })
+
+  it('treats aliases of a granted app as granted', () => {
+    const access = new AccessControl()
+    access.grant('s1', ['explorer'])
+    expect(access.missing('s1', ['文件资源管理器', '计算器'])).toEqual(['计算器'])
+    access.grant('s1', ['计算器'])
+    expect(access.missing('s1', ['设置'])).toEqual(['设置']) // UWP frame host alone does not link them
+  })
 })

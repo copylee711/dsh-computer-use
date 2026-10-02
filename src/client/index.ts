@@ -327,7 +327,7 @@ function ComputerUseSection({ ctx }: { ctx: ClientContext }) {
       h('h3', { style: S.cardTitle }, '截图'),
       h(ToggleRow, { title: '操作后自动回传截图', hint: '省去模型再截一次图的一轮调用；关闭可省 token。', checked: draft.autoScreenshot, disabled, onChange: value => edit('autoScreenshot', value) }),
       h('div', { style: S.grid2 },
-        h(NumberField, { label: '操作后等待界面稳定', unit: '毫秒', value: draft.settleMs, error: errors.settleMs, disabled, onChange: value => edit('settleMs', value) }),
+        h(NumberField, { label: '操作后至少等待（之后画面静止即截图，最多约 2.5 秒）', unit: '毫秒', value: draft.settleMs, error: errors.settleMs, disabled, onChange: value => edit('settleMs', value) }),
         h(NumberField, { label: '截图最长边', unit: '像素', value: draft.maxLongEdge, error: errors.maxLongEdge, disabled, onChange: value => edit('maxLongEdge', value) }),
         h(NumberField, { label: '截图总像素上限', unit: '百万像素', value: draft.maxMegapixels, error: errors.maxMegapixels, disabled, onChange: value => edit('maxMegapixels', value) }),
         h(NumberField, { label: 'JPEG 质量', unit: '30–100', value: draft.jpegQuality, error: errors.jpegQuality, disabled, onChange: value => edit('jpegQuality', value) }),

@@ -16,4 +16,25 @@ const host: UserConfig = {
   deps: { onlyBundle: false },
 }
 
-export default [host]
+/** Browser half: one ModuleLoader-wrapped file; React comes from the host. */
+const client: UserConfig = {
+  name: '@copylee/dsh-computer-use/client',
+  entry: { client: 'lib/types/client/index.js' },
+  outDir: 'lib',
+  format: 'cjs',
+  platform: 'browser',
+  target: 'es2022',
+  dts: false,
+  clean: false,
+  deps: { neverBundle: ['react', 'react/jsx-runtime', 'react-dom'], onlyBundle: false },
+  // The host webview has no `process` global; bake NODE_ENV at build time.
+  define: { 'process.env.NODE_ENV': JSON.stringify('production') },
+  outputOptions: {
+    entryFileNames: 'client.js',
+    banner: 'window.__ModuleLoader__.load({ id: "@copylee/dsh-computer-use", factory: (require) => {',
+    footer: 'return module.exports; } });',
+    intro: 'var module = { exports: {} }; var exports = module.exports;',
+  },
+}
+
+export default [host, client]

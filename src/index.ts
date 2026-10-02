@@ -9,13 +9,18 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from './system-prompt-service.js'
 import { AccessControl, normalizeApp, type AccessMode } from './access.js'
 import { Computer, type CallContext, type Settings } from './computer.js'
 import { HelperClient, helperAssetPath } from './helper-client.js'
 import { OverlayController, type CancellableAgent, type HostWindowMode } from './overlay.js'
 import { promptText } from './prompt.js'
+import { resolveConfig } from './settings.js'
+import { PREVIEW_ROUTE, STATUS_ROUTE, previewRoute, statusRoute } from './routes.js'
 import { createTools } from './tools.js'
+
+export { DEFAULTS, ENTRY_ID, resolveConfig } from './settings.js'
 
 export const name = '@copylee/dsh-computer-use'
 export const inject = ['tools', 'attachments']
@@ -37,20 +42,6 @@ export interface Config {
   userIdleMs?: number
 }
 
-const DEFAULTS: Settings = {
-  accessMode: 'per-app',
-  overlay: true,
-  overlayLabel: 'DeepSeek Harness',
-  hostWindow: 'card',
-  autoScreenshot: true,
-  settleMs: 400,
-  maxLongEdge: 1366,
-  maxPixels: 1_150_000,
-  jpegQuality: 80,
-  blockedApps: [],
-  pauseOnUserInput: true,
-  userIdleMs: 1500,
-}
 
 export const Config: z<Config> = z.object({
   accessMode: z.union([
@@ -110,38 +101,6 @@ export const Config: z<Config> = z.object({
   }),
 }) as unknown as z<Config>
 
-/** Unwrap `.volatile()` refs (`{ get() }`) and fall back to defaults for bad values. */
-export function resolveConfig(raw: unknown): Settings {
-  const out: Record<string, unknown> = {}
-  if (raw !== null && typeof raw === 'object') {
-    for (const [key, value] of Object.entries(raw)) {
-      out[key] = value !== null && typeof value === 'object' && typeof (value as { get?: unknown }).get === 'function'
-        ? (value as { get: () => unknown }).get()
-        : value
-    }
-  }
-  const num = (key: 'settleMs' | 'maxLongEdge' | 'maxPixels' | 'jpegQuality' | 'userIdleMs', min: number, max: number): number => {
-    const value = out[key]
-    return typeof value === 'number' && Number.isFinite(value) ? Math.min(max, Math.max(min, Math.round(value))) : DEFAULTS[key]
-  }
-  const bool = (key: 'overlay' | 'autoScreenshot' | 'pauseOnUserInput'): boolean => typeof out[key] === 'boolean' ? out[key] : DEFAULTS[key]
-  return {
-    accessMode: out.accessMode === 'allow-all' || out.accessMode === 'per-app' ? out.accessMode : DEFAULTS.accessMode,
-    overlay: bool('overlay'),
-    overlayLabel: typeof out.overlayLabel === 'string' && out.overlayLabel.trim() !== '' ? out.overlayLabel.trim().slice(0, 40) : DEFAULTS.overlayLabel,
-    hostWindow: out.hostWindow === 'card' || out.hostWindow === 'minimize' || out.hostWindow === 'keep'
-      ? out.hostWindow
-      : out.minimizeHostWindow === true ? 'minimize' : DEFAULTS.hostWindow,
-    autoScreenshot: bool('autoScreenshot'),
-    settleMs: num('settleMs', 0, 5000),
-    maxLongEdge: num('maxLongEdge', 640, 3840),
-    maxPixels: num('maxPixels', 300_000, 8_000_000),
-    jpegQuality: num('jpegQuality', 30, 100),
-    pauseOnUserInput: bool('pauseOnUserInput'),
-    userIdleMs: num('userIdleMs', 300, 10_000),
-    blockedApps: Array.isArray(out.blockedApps) ? out.blockedApps.filter((item): item is string => typeof item === 'string' && item.trim() !== '') : [],
-  }
-}
 
 /** The slice of a host Agent this plugin touches. */
 interface AgentLike extends CancellableAgent {
@@ -160,7 +119,8 @@ export function apply(ctx: Context, config: Config = {}): void {
   const log = (message: string): void => ctx.logger.info(message)
   const helper = new HelperClient(message => ctx.logger.warn(message))
   const access = new AccessControl()
-  const overlay = new OverlayController(helper, settings, log, helperAssetPath('deepseek-white.png'))
+  const iconPath = helperAssetPath('deepseek-white.png')
+  const overlay = new OverlayController(helper, settings, log, iconPath)
   const computer = new Computer(helper, access, overlay, settings)
   ctx.effect(() => () => {
     void overlay.end().finally(() => helper.dispose())
@@ -232,6 +192,25 @@ export function apply(ctx: Context, config: Config = {}): void {
   ctx.on('agent/disposed', ({ agent }) => {
     access.forget((agent as unknown as AgentLike).session.id)
     if (overlay.controller === (agent as unknown)) void overlay.end()
+  })
+
+  // Settings page bridge (status + overlay preview); optional so headless hosts still load.
+  ctx.inject(['webServer'], (webCtx: Context) => {
+    const route = (path: string, handler: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>): void => {
+      // Never let a throw reach the host server: it answers a bare, body-less 400.
+      const safe = async (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse): Promise<void> => {
+        try {
+          await handler(req, res)
+        } catch (error) {
+          if (res.headersSent) { res.destroy(); return }
+          res.writeHead(500, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+          res.end(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }))
+        }
+      }
+      webCtx.effect(() => webCtx.webServer.register({ kind: 'exact', path, handler: safe }), `computer-use: ${path}`)
+    }
+    route(STATUS_ROUTE, statusRoute(helper, settings, overlay))
+    route(PREVIEW_ROUTE, previewRoute(helper, settings, overlay, iconPath))
   })
 
   ctx.inject(['systemPrompt'], (promptCtx: Context) => {

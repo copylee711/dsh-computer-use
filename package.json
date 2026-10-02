@@ -1,6 +1,6 @@
 {
   "name": "@copylee/dsh-computer-use",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "DeepSeek Harness Computer Use 插件（Windows）：让 AI 看屏幕、点鼠标、敲键盘操控电脑；控制时屏幕泛起橙色光晕并显示“DeepSeek Harness 正在操控你的电脑”，按 Esc 暂停 / 继续。",
   "type": "module",
   "author": "copylee",
@@ -19,10 +19,15 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
     "lib/index.js",
+    "lib/client.js",
     "lib/types/**/*.d.ts",
     "helper/CuHelper.cs",
     "helper/deepseek-white.png",
@@ -39,6 +44,15 @@
     },
     "engines": {
       "dsh": ">=0.2.0-rc.2"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-locale"
+      ],
+      "platform": "web"
     }
   },
   "scripts": {
@@ -70,7 +84,8 @@
   ],
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.0 <5",
-    "@deepseek-ai/schemastery": ">=3.18.0 <4"
+    "@deepseek-ai/schemastery": ">=3.18.0 <4",
+    "react": ">=18.2.0 <19"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -78,17 +93,23 @@
     },
     "@deepseek-ai/schemastery": {
       "optional": true
+    },
+    "react": {
+      "optional": true
     }
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.4",
     "@deepseek-ai/dsh-agent": "0.2.0-rc.2",
     "@deepseek-ai/dsh-attachment": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-host-webserver": "0.2.0-rc.2",
     "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
     "@deepseek-ai/dsh-session": "0.2.0-rc.2",
     "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
     "@deepseek-ai/schemastery": "3.18.4",
     "@types/node": "^22.20.0",
+    "@types/react": "~18.3.31",
+    "react": "^18.3.1",
     "tsdown": "^0.22.2",
     "typescript": "^6.0.3",
     "vitest": "^4.1.8"

@@ -412,19 +412,38 @@ namespace DshComputerUse
             int ow = Args.Int(r, "outWidth", w), oh = Args.Int(r, "outHeight", h);
             int quality = Args.Int(r, "quality", 80);
             if (w <= 0 || h <= 0 || ow <= 0 || oh <= 0) throw new Exception("invalid capture size");
+            string via = "blt";
             using (var bmp = new Bitmap(w, h, PixelFormat.Format24bppRgb))
             {
                 using (var g = Graphics.FromImage(bmp))
                 {
                     IntPtr dst = g.GetHdc();
                     IntPtr src = Native.GetDC(IntPtr.Zero);
-                    // The DSH card is for the user only: capture what is under it
-                    // (it blinks out for the duration of this one BitBlt).
-                    using (CardLayer.Hide(new Rectangle(x, y, w, h)))
+                    // The DSH card is for the user only: capture what is under it.
+                    // Preferred: the Magnification API renders the screen without
+                    // the card (no flicker). Fallback: hide the card for one BitBlt.
+                    bool done = false;
+                    var area = new Rectangle(x, y, w, h);
+                    via = "blt";
+                    if (CardLayer.Covers(area))
                     {
-                        try { Native.BitBlt(dst, 0, 0, w, h, src, x, y, 0x00CC0020 | 0x40000000); }
-                        finally { Native.ReleaseDC(IntPtr.Zero, src); g.ReleaseHdc(dst); }
+                        g.ReleaseHdc(dst);
+                        dst = IntPtr.Zero;
+                        using (var mag = MagCapture.Capture(area, CardLayer.Hwnd))
+                        {
+                            if (mag != null) { g.DrawImageUnscaled(mag, 0, 0); done = true; via = "mag"; }
+                        }
+                        if (!done) dst = g.GetHdc();
                     }
+                    if (!done)
+                    {
+                        using (CardLayer.Hide(area))
+                        {
+                            try { Native.BitBlt(dst, 0, 0, w, h, src, x, y, 0x00CC0020 | 0x40000000); }
+                            finally { g.ReleaseHdc(dst); }
+                        }
+                    }
+                    Native.ReleaseDC(IntPtr.Zero, src);
                 }
                 // compare: report "unchanged" instead of an identical image; mark: remember for next time.
                 bool compare = Args.Bool(r, "compare", false), mark = Args.Bool(r, "mark", false) || compare;
@@ -468,6 +487,7 @@ namespace DshComputerUse
                         output.Save(ms, jpegCodec, ep);
                         var d = new Dictionary<string, object>();
                         d["data"] = Convert.ToBase64String(ms.ToArray());
+                        d["via"] = via == "blt" && MagCapture.Why.Length > 0 ? "blt (" + MagCapture.Why + ")" : via;
                         d["width"] = ow; d["height"] = oh;
                         return d;
                     }
@@ -845,6 +865,15 @@ namespace DshComputerUse
             g.FillRectangle(Brushes.Black, r.X - ox, r.Y - oy, r.Width, r.Height);
         }
 
+        /** Is the card visible over (any part of) this screen rectangle? */
+        public static bool Covers(Rectangle area)
+        {
+            if (!Live()) return false;
+            var r = Frame(Hwnd);
+            r.Inflate(32, 32);
+            return r.IntersectsWith(area);
+        }
+
         /** Make the card invisible while a capture of `area` runs (dispose to show it again). */
         public static IDisposable Hide(Rectangle area)
         {
@@ -866,6 +895,102 @@ namespace DshComputerUse
             {
                 if (hwnd != IntPtr.Zero && Native.IsWindow(hwnd)) Native.SetLayeredWindowAttributes(hwnd, 0, 255, 2);
             }
+        }
+    }
+
+    /**
+     * Screen capture through the Windows Magnification API, which can leave
+     * out windows of other processes (MagSetWindowFilterList). The magnifier
+     * control lives in a never-shown host window; MagSetWindowSource renders
+     * synchronously into the scaling callback. Any failure disables it for the
+     * rest of the run and callers fall back to BitBlt.
+     */
+    internal static class MagCapture
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MAGIMAGEHEADER { public uint width; public uint height; public Guid format; public uint stride; public uint offset; public UIntPtr cbSize; }
+
+        delegate bool ScalingCallback(IntPtr hwnd, IntPtr srcdata, MAGIMAGEHEADER srcheader, IntPtr destdata, MAGIMAGEHEADER destheader, Native.RECT unclipped, Native.RECT clipped, IntPtr dirty);
+
+        [DllImport("Magnification.dll")] static extern bool MagInitialize();
+        [DllImport("Magnification.dll")] static extern bool MagSetWindowSource(IntPtr hwnd, Native.RECT rect);
+        [DllImport("Magnification.dll")] static extern bool MagSetWindowFilterList(IntPtr hwnd, int mode, int count, IntPtr[] list);
+        [DllImport("Magnification.dll")] static extern bool MagSetImageScalingCallback(IntPtr hwnd, ScalingCallback cb);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        static extern IntPtr CreateWindowEx(int ex, string cls, string name, int style, int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr inst, IntPtr param);
+
+        static bool broken;
+        public static string Why = "";
+        static Form host;
+        static IntPtr magnifier = IntPtr.Zero;
+        static ScalingCallback callback;
+        static Bitmap frame;
+
+        static bool Ready()
+        {
+            if (broken) return false;
+            if (magnifier != IntPtr.Zero) return true;
+            try
+            {
+                if (!MagInitialize()) { broken = true; Why = "init"; return false; }
+                host = new Form { FormBorderStyle = FormBorderStyle.None, ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(0, 0), Size = new Size(16, 16) };
+                IntPtr parent = host.Handle; // created, never shown
+                magnifier = CreateWindowEx(0, "Magnifier", "cu-magnifier", 0x40000000 | 0x10000000, 0, 0, 16, 16, parent, IntPtr.Zero, Native.GetModuleHandle(null), IntPtr.Zero);
+                callback = OnImage;
+                if (magnifier == IntPtr.Zero || !MagSetImageScalingCallback(magnifier, callback)) { broken = true; Why = "callback"; return false; }
+                return true;
+            }
+            catch (Exception e) { broken = true; Why = "ready: " + e.Message; return false; }
+        }
+
+        /** The screen rectangle without the `exclude` window, or null when unavailable. */
+        public static Bitmap Capture(Rectangle area, IntPtr exclude)
+        {
+            if (!Ready()) return null;
+            try
+            {
+                // The never-shown host must be as large as the capture, or the control is clipped.
+                Native.SetWindowPos(host.Handle, IntPtr.Zero, 0, 0, area.Width, area.Height, 0x0004 | 0x0010);
+                Native.SetWindowPos(magnifier, IntPtr.Zero, 0, 0, area.Width, area.Height, 0x0004 | 0x0010); // NOZORDER | NOACTIVATE
+                if (!MagSetWindowFilterList(magnifier, 0 /* MW_FILTERMODE_EXCLUDE */, 1, new[] { exclude })) { broken = true; Why = "filter"; return null; }
+                frame = null;
+                var rc = new Native.RECT { Left = area.Left, Top = area.Top, Right = area.Right, Bottom = area.Bottom };
+                if (!MagSetWindowSource(magnifier, rc)) { broken = true; Why = "source"; return null; }
+                var result = frame;
+                frame = null;
+                if (result == null || result.Width != area.Width || result.Height != area.Height)
+                {
+                    Why = result == null ? "no frame" : "size " + result.Width + "x" + result.Height;
+                    if (result != null) result.Dispose();
+                    broken = true;
+                    return null;
+                }
+                return result;
+            }
+            catch (Exception e) { broken = true; Why = "capture: " + e.Message; return null; }
+        }
+
+        static bool OnImage(IntPtr hwnd, IntPtr srcdata, MAGIMAGEHEADER h, IntPtr destdata, MAGIMAGEHEADER dh, Native.RECT unclipped, Native.RECT clipped, IntPtr dirty)
+        {
+            try
+            {
+                var bmp = new Bitmap((int)h.width, (int)h.height, PixelFormat.Format32bppRgb);
+                var data = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height), ImageLockMode.WriteOnly, PixelFormat.Format32bppRgb);
+                try
+                {
+                    int rowBytes = (int)h.width * 4;
+                    var row = new byte[rowBytes];
+                    for (int y = 0; y < h.height; y++)
+                    {
+                        Marshal.Copy(new IntPtr(srcdata.ToInt64() + h.offset + (long)y * h.stride), row, 0, rowBytes);
+                        Marshal.Copy(row, 0, new IntPtr(data.Scan0.ToInt64() + (long)y * data.Stride), rowBytes);
+                    }
+                }
+                finally { bmp.UnlockBits(data); }
+                frame = bmp;
+            }
+            catch (Exception) { frame = null; }
+            return true;
         }
     }
 

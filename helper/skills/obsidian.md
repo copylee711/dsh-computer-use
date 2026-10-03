@@ -9,3 +9,4 @@ summary: 新建笔记、Markdown 打字规律
 - 列表会自动续行：在“- 甲”后按 Return 会自动出现下一个“- ”。逐行打字时只在第一项写“- ”，后面各项直接写内容；连按两次 Return 退出列表。
 - 标题（## ）前最好留一个空行，否则渲染可能和上一段粘在一起。
 - ctrl+f 在当前笔记内查找，ctrl+Home 回到开头。
+- 快捷键：ctrl+o 快速切换 / 新建；ctrl+n 新建笔记；ctrl+p 命令面板；ctrl+e 切换编辑 / 阅读视图；ctrl+f 当前笔记内查找，ctrl+shift+f 全库搜索；ctrl+b / ctrl+i 粗体 / 斜体；ctrl+k 插入链接；ctrl+w 关闭当前标签页；ctrl+Home / ctrl+End 笔记开头 / 结尾；ctrl+z 撤销；ctrl+, 设置。

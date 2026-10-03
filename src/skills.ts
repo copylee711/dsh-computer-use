@@ -46,7 +46,7 @@ export interface SkillInput {
   content: string
 }
 
-interface Parsed { app: string; match: string[]; summary: string; content: string; disabled: boolean }
+interface Parsed { app: string; match: string[]; summary: string; content: string; disabled: boolean; extend: boolean }
 
 export function skillId(app: string): string {
   const id = app.trim().toLowerCase().replace(/\.exe$/, '').replace(/[\\/:*?"<>|\s.]+/g, '-').replace(/^-+|-+$/g, '')
@@ -54,7 +54,7 @@ export function skillId(app: string): string {
 }
 
 export function parseSkill(text: string, fallbackApp: string): Parsed {
-  const out: Parsed = { app: fallbackApp, match: [], summary: '', content: text.trim(), disabled: false }
+  const out: Parsed = { app: fallbackApp, match: [], summary: '', content: text.trim(), disabled: false, extend: false }
   const front = /^﻿?---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text)
   if (!front) return out
   out.content = text.slice(front[0].length).trim()
@@ -67,13 +67,16 @@ export function parseSkill(text: string, fallbackApp: string): Parsed {
     else if (key === 'match') out.match = value.split(/[,，]/).map(item => item.trim()).filter(Boolean)
     else if (key === 'summary') out.summary = value
     else if (key === 'disabled') out.disabled = value === 'true'
+    else if (key === 'extends') out.extend = value === 'builtin'
   }
   return out
 }
 
-export function formatSkill(skill: { app: string; match: string[]; summary: string; content: string }, disabled = false): string {
+export function formatSkill(skill: { app: string; match: string[]; summary: string; content: string }, disabled = false, extend = false): string {
   const head = [`app: ${skill.app}`, `match: ${skill.match.join(', ')}`, `summary: ${skill.summary.replace(/\r?\n/g, ' ')}`]
   if (disabled) head.push('disabled: true')
+  // The notes are additions to the built-in skill of the same id, which keeps receiving updates.
+  if (extend) head.push('extends: builtin')
   return `---\n${head.join('\n')}\n---\n${skill.content.trim()}\n`
 }
 
@@ -83,8 +86,8 @@ export class SkillStore {
     readonly userDir = join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'computer-use-skills'),
   ) {}
 
-  private load(dir: string, source: 'builtin' | 'user'): Map<string, Skill & { disabled: boolean }> {
-    const map = new Map<string, Skill & { disabled: boolean }>()
+  private load(dir: string, source: 'builtin' | 'user'): Map<string, Skill & { disabled: boolean; extend: boolean }> {
+    const map = new Map<string, Skill & { disabled: boolean; extend: boolean }>()
     if (!existsSync(dir)) return map
     for (const name of readdirSync(dir)) {
       if (!name.toLowerCase().endsWith('.md')) continue
@@ -94,7 +97,7 @@ export class SkillStore {
         const id = skillId(name.slice(0, -3))
         map.set(id, {
           id, app: parsed.app, match: parsed.match.length > 0 ? parsed.match : [parsed.app], summary: parsed.summary,
-          content: parsed.content, source, overrides: false, updatedAt: statSync(path).mtimeMs, disabled: parsed.disabled,
+          content: parsed.content, source, overrides: false, updatedAt: statSync(path).mtimeMs, disabled: parsed.disabled, extend: parsed.extend,
         })
       } catch { /* unreadable file: skip */ }
     }
@@ -108,12 +111,15 @@ export class SkillStore {
     const out: Skill[] = []
     for (const [id, skill] of user) {
       if (skill.disabled) continue
-      const { disabled: _disabled, ...rest } = skill
-      out.push({ ...rest, overrides: builtin.has(id) })
+      const { disabled: _disabled, extend, ...rest } = skill
+      const base = extend ? builtin.get(id) : undefined
+      // "extends: builtin": the built-in skill plus the notes added on top of it.
+      if (base) out.push({ ...rest, app: base.app, match: [...new Set([...base.match, ...rest.match])], summary: rest.summary || base.summary, content: `${base.content}\n${rest.content}`.trim(), overrides: true })
+      else out.push({ ...rest, overrides: builtin.has(id) })
     }
     for (const [id, skill] of builtin) {
       if (user.has(id)) continue
-      const { disabled: _disabled, ...rest } = skill
+      const { disabled: _disabled, extend: _extend, ...rest } = skill
       out.push(rest)
     }
     return out.sort((a, b) => a.app.localeCompare(b.app, 'zh-CN'))
@@ -138,13 +144,14 @@ export class SkillStore {
     return this.list().map(skill => `${skill.app}${skill.summary ? ` (${skill.summary})` : ''}`).join('; ')
   }
 
-  save(input: SkillInput, id = skillId(input.app)): Skill {
+  save(input: SkillInput, id = skillId(input.app), extend = false): Skill {
     const app = input.app.trim()
     if (app === '') throw new Error('app is required.')
     const content = input.content.trim()
     if (content === '') throw new Error('content is empty.')
-    if (content.length > SKILL_MAX_CHARS) {
-      throw new Error(`The skill would be ${content.length} characters; the limit is ${SKILL_MAX_CHARS}. Condense it (merge duplicates, drop one-off details) and write it again.`)
+    const total = content.length + (extend ? (this.load(this.builtinDir, 'builtin').get(skillId(id))?.content.length ?? 0) + 1 : 0)
+    if (total > SKILL_MAX_CHARS) {
+      throw new Error(`The skill would be ${total} characters; the limit is ${SKILL_MAX_CHARS}. Condense it (merge duplicates, drop one-off details) and write it again.`)
     }
     const previous = this.get(id)
     const match = [...new Set([...(input.match ?? []), ...(previous?.match ?? []), app].map(item => item.trim()).filter(item => item !== '' && !GENERIC_HOSTS.test(item)))]
@@ -152,15 +159,21 @@ export class SkillStore {
     mkdirSync(this.userDir, { recursive: true })
     const path = join(this.userDir, `${skillId(id)}.md`)
     const tmp = `${path}.tmp`
-    writeFileSync(tmp, formatSkill({ app, match, summary, content }), 'utf8')
+    writeFileSync(tmp, formatSkill({ app, match, summary, content }, false, extend), 'utf8')
     renameSync(tmp, path)
     return this.get(id)!
   }
 
   append(app: string, text: string, extra: { match?: string[]; summary?: string } = {}): Skill {
     const previous = this.find(app)
-    const content = previous ? `${previous.content}\n${text.trim()}` : text.trim()
-    return this.save({ app: previous?.app ?? app, content, ...extra }, previous?.id ?? skillId(app))
+    if (!previous) return this.save({ app, content: text.trim(), ...extra })
+    // Notes on top of a built-in skill are kept apart from it, so the built-in part stays up to date.
+    const own = this.load(this.userDir, 'user').get(previous.id)
+    const builtin = this.load(this.builtinDir, 'builtin').has(previous.id)
+    if (builtin && (!own || own.extend)) {
+      return this.save({ app: previous.app, content: own ? `${own.content}\n${text.trim()}` : text.trim(), ...extra }, previous.id, true)
+    }
+    return this.save({ app: previous.app, content: `${previous.content}\n${text.trim()}`, ...extra }, previous.id)
   }
 
   /** Delete a user skill; a built-in one is hidden by a disabled override. */

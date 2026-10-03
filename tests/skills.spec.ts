@@ -14,7 +14,7 @@ function store() {
 
 describe('app skills', () => {
   it('parses front matter and derives ids', () => {
-    expect(parseSkill('---\napp: QQ\nmatch: QQ, QQ.exe\nsummary: 群文件\n---\n- a\n', 'x')).toEqual({ app: 'QQ', match: ['QQ', 'QQ.exe'], summary: '群文件', content: '- a', disabled: false })
+    expect(parseSkill('---\napp: QQ\nmatch: QQ, QQ.exe\nsummary: 群文件\n---\n- a\n', 'x')).toEqual({ app: 'QQ', match: ['QQ', 'QQ.exe'], summary: '群文件', content: '- a', disabled: false, extend: false })
     expect(parseSkill('- just notes', 'obsidian').app).toBe('obsidian')
     expect(skillId('WINWORD.EXE')).toBe('winword')
     expect(skillId('Visual Studio Code')).toBe('visual-studio-code')
@@ -64,5 +64,20 @@ describe('shared host processes', () => {
     expect(skills.get('计算器')?.match).toEqual(['计算器'])
     expect(skills.find('设置', { exe: 'ApplicationFrameHost.exe', title: '设置' })).toBeUndefined()
     expect(skills.find('x', { exe: 'ApplicationFrameHost.exe', title: '计算器' })?.app).toBe('计算器')
+  })
+})
+
+describe('notes on top of a built-in skill', () => {
+  it('are stored apart and merged when read, so built-in updates still apply', () => {
+    const { skills, root } = store()
+    const merged = skills.append('Word', '- 我的补充')
+    expect(merged.content).toBe('- F12 另存为\n- 我的补充')
+    expect(readFileSync(join(root, 'user', 'word.md'), 'utf8')).toContain('extends: builtin')
+    expect(readFileSync(join(root, 'user', 'word.md'), 'utf8')).not.toContain('F12')
+    writeFileSync(join(root, 'builtin', 'word.md'), '---\napp: Word\nmatch: Word, winword.exe\nsummary: 另存为\n---\n- F12 另存为（新版）\n')
+    expect(skills.append('word', '- 第二条').content).toBe('- F12 另存为（新版）\n- 我的补充\n- 第二条')
+    // A full rewrite replaces the built-in text.
+    skills.save({ app: 'Word', content: '- 全部重写' })
+    expect(skills.get('word')?.content).toBe('- 全部重写')
   })
 })

@@ -7,3 +7,4 @@ summary: Markdown 打字规律、源码模式
 - 逐字敲 Markdown 符号会被自动补全（** 变成 ****、括号成对、列表自动续行），所以不要自己一个字符一个字符地敲格式符号。
 - ctrl+/ 切换源码模式；在源码模式下看到的是原始 Markdown。
 - 保存：ctrl+s，新文件会弹出另存为对话框，alt+n、ctrl+a 后输入完整路径再 Return。
+- 快捷键：ctrl+n 新建；ctrl+s 保存，ctrl+shift+s 另存为；ctrl+1…6 标题 1…6，ctrl+0 正文；ctrl+b / ctrl+i 粗体 / 斜体；ctrl+shift+k 代码块，ctrl+shift+m 公式块，ctrl+t 表格，ctrl+k 链接；ctrl+f 查找，ctrl+h 替换；ctrl+Home / ctrl+End 文首 / 文末；ctrl+shift+l 侧边栏。

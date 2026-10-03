@@ -17,8 +17,9 @@ import { Computer, type CallContext, type Settings, type TypingMode } from './co
 import { HelperClient, helperAssetPath } from './helper-client.js'
 import { OverlayController, type CancellableAgent, type HostWindowMode, type StreamFrame } from './overlay.js'
 import { promptText } from './prompt.js'
+import { SkillStore } from './skills.js'
 import { resolveConfig } from './settings.js'
-import { PREVIEW_ROUTE, SCREENSHOTS_CLEAN_ROUTE, SCREENSHOTS_ROUTE, STATUS_ROUTE, previewRoute, screenshotsCleanRoute, screenshotsRoute, statusRoute } from './routes.js'
+import { PREVIEW_ROUTE, SCREENSHOTS_CLEAN_ROUTE, SCREENSHOTS_ROUTE, STATUS_ROUTE, SKILLS_ROUTE, skillsRoute, previewRoute, screenshotsCleanRoute, screenshotsRoute, statusRoute } from './routes.js'
 import { ScreenshotCache } from './screenshots.js'
 import { createTools } from './tools.js'
 
@@ -174,8 +175,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     first.unref(); every.unref()
     return () => { clearTimeout(first); clearInterval(every) }
   }, 'computer-use: screenshot cleanup')
+  const skills = new SkillStore(helperAssetPath('skills'))
   const tools = createTools({
     computer,
+    skills,
     async saveImage(shot, fileName) {
       const ref = await attachments().saveImage({ data: shot.data, mediaType: 'image/jpeg', name: fileName })
       screenshots.record(String(ref.attachmentId))
@@ -271,6 +274,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     route(PREVIEW_ROUTE, previewRoute(helper, settings, overlay, iconPath))
     route(SCREENSHOTS_ROUTE, screenshotsRoute(screenshots))
     route(SCREENSHOTS_CLEAN_ROUTE, screenshotsCleanRoute(screenshots))
+    route(SKILLS_ROUTE, skillsRoute(skills))
   })
 
   ctx.inject(['systemPrompt'], (promptCtx: Context) => {

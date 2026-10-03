@@ -10,6 +10,7 @@ import { DEFAULTS, ENTRY_ID, resolveConfig } from '../settings.js'
 import type { Settings } from '../computer.js'
 import { registerNavIcon } from './nav-icon.js'
 import { Select, selectCss } from './select.js'
+import { SkillsCard } from './skills-card.js'
 
 const STATUS_ROUTE = '/api/dsh-computer-use/status'
 const SCREENSHOTS_ROUTE = '/api/dsh-computer-use/screenshots'
@@ -407,6 +408,8 @@ function ComputerUseSection({ ctx }: { ctx: ClientContext }) {
       ),
       h('p', { style: S.hint }, '截图越大越清晰、点得越准，但每张图消耗的 token 也越多。默认值（最长边 1366、1.15 百万像素）适合大多数模型。'),
     ),
+
+    h(SkillsCard, { S }),
 
     // Screenshot cache
     h('section', { style: S.card },

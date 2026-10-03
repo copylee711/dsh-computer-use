@@ -4,6 +4,10 @@ import { Computer, type Settings } from '../src/computer.js'
 import type { HelperEvent, HelperLike } from '../src/helper-client.js'
 import { OverlayController, cardRect } from '../src/overlay.js'
 import { createTools } from '../src/tools.js'
+import { SkillStore } from '../src/skills.js'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 const SETTINGS: Settings = {
   accessMode: 'per-app', blockedApps: [], overlay: true, overlayLabel: 'DeepSeek Harness', hostWindow: 'keep', cardOpacity: 80,
@@ -38,7 +42,7 @@ class FakeHelper implements HelperLike {
   dispose(): void {}
 }
 
-function setup(options: { vision?: boolean; mode?: Settings['accessMode']; typing?: Settings['typingMode'] } = {}) {
+function setup(options: { vision?: boolean; mode?: Settings['accessMode']; typing?: Settings['typingMode']; skills?: SkillStore } = {}) {
   const helper = new FakeHelper()
   const access = new AccessControl()
   const settings = { ...SETTINGS, accessMode: options.mode ?? 'per-app', typingMode: options.typing ?? SETTINGS.typingMode }
@@ -49,6 +53,7 @@ function setup(options: { vision?: boolean; mode?: Settings['accessMode']; typin
   const agent = { cancel: () => { cancelled++ } }
   const tools = createTools({
     computer,
+    ...(options.skills ? { skills: options.skills } : {}),
     saveImage: async shot => {
       saved.push(shot.width)
       return { attachmentId: `att-${saved.length}`, mediaType: 'image/jpeg', bytes: 4, width: shot.width, height: shot.height } as never
@@ -414,5 +419,36 @@ describe('progress card', () => {
     await overlay.end(agent)
     expect(helper.calls.some(c => c.cmd === 'pet_finish')).toBe(true)
     expect(helper.calls.some(c => c.cmd === 'overlay_hide')).toBe(false)
+  })
+})
+
+describe('app skills in tools', () => {
+  const store = () => {
+    const root = mkdtempSync(join(tmpdir(), 'cu-skills-tools-'))
+    mkdirSync(join(root, 'builtin'))
+    writeFileSync(join(root, 'builtin', 'chrome.md'), '---\napp: Chrome\nmatch: Chrome, chrome.exe\nsummary: 地址栏\n---\n- ctrl+l 聚焦地址栏\n')
+    return new SkillStore(join(root, 'builtin'), join(root, 'user'))
+  }
+
+  it('open_application hands over the app skill once per session', async () => {
+    const t = setup({ mode: 'allow-all', skills: store() })
+    const original = t.helper.call.bind(t.helper)
+    t.helper.call = async <T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> =>
+      cmd === 'focus' ? { ...CHROME, focused: true } as T : original<T>(cmd, args)
+    const first = await t.run('open_application', { name: 'Chrome' })
+    expect(first.text).toContain('Your skill notes for Chrome')
+    expect(first.text).toContain('ctrl+l 聚焦地址栏')
+    const second = await t.run('open_application', { name: 'Chrome' })
+    expect(second.text).not.toContain('ctrl+l 聚焦地址栏')
+  })
+
+  it('app_skill records and reads notes', async () => {
+    const skills = store()
+    const t = setup({ mode: 'allow-all', skills })
+    const saved = await t.run('app_skill', { action: 'append', app: 'Chrome', content: '- ctrl+t 新标签页' })
+    expect(saved.text).toContain('Skill for Chrome saved')
+    expect((await t.run('app_skill', { action: 'read', app: 'chrome' })).text).toContain('- ctrl+l 聚焦地址栏\n- ctrl+t 新标签页')
+    expect((await t.run('app_skill', { action: 'list' })).text).toContain('Chrome — 地址栏')
+    await expect(t.run('app_skill', { action: 'write', app: 'Chrome', content: 'x'.repeat(5000) })).rejects.toThrow(/Condense/)
   })
 })

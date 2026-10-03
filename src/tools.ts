@@ -6,6 +6,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { defineTool, type ToolCallView } from '@deepseek-ai/dsh-tools'
 import { appMatches, isHostWindow, isTransientShell, normalizeApp } from './access.js'
+import { SKILL_MAX_CHARS, type SkillStore } from './skills.js'
 import { ACTIONS, Computer, UNCHANGED_TEXT, type ActionInput, type CallContext, type Shot, type WindowInfo } from './computer.js'
 
 type ToolDefinition = ReturnType<typeof defineTool>
@@ -16,6 +17,8 @@ export interface ToolHost {
   saveImage(shot: Shot, name: string): Promise<ImageAttachmentRef>
   /** Build the per-call context (session, agent, vision support). */
   context(exec: unknown): Promise<CallContext>
+  /** Per-app notes the agent keeps (optional: tests run without). */
+  skills?: SkillStore
 }
 
 // ----------------------------------------------------------------- output
@@ -223,6 +226,11 @@ export function createTools(host: ToolHost): ToolDefinition[] {
           await sleep(250, undefined, { signal: call.signal })
           const now = await computer.foreground()
           if (now && now.hwnd !== before?.hwnd && !isHostWindow(now) && !isTransientShell(now) && (now.exe.toLowerCase() !== 'explorer.exe' || now.className === 'CabinetWClass')) break
+          // The app's window is up but something transient (the IME bar) holds the foreground: bring it forward.
+          if (i >= 4 && i % 4 === 0 && !isUri) {
+            const opened = (await computer.windows()).find(win => !isHostWindow(win) && appMatches(name, win))
+            if (opened) { await computer.focus(opened).catch(() => undefined); break }
+          }
         }
       }
       const fg = await computer.foreground()
@@ -232,10 +240,24 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       }
       await computer.settle(call.signal)
       const shot = call.vision ? await computer.screenshot() : undefined
-      return withShot(host, `${how} ${await computer.describeForeground()}`, shot, call)
+      return withShot(host, `${how} ${await computer.describeForeground()}${skillNote(call.session, name, fg)}`, shot, call)
     },
     presentCall: args => card(`打开应用 · ${(args as { name?: string }).name ?? ''}`),
   }))
+
+  /** Skills already handed to a session, so each is attached once. */
+  const told = new Map<string, Set<string>>()
+
+  /** The app's skill, appended to open_application's result the first time in a session. */
+  function skillNote(session: string, name: string, win: WindowInfo | undefined): string {
+    const skill = host.skills?.find(name, win && !isHostWindow(win) ? win : undefined)
+    if (!skill) return host.skills ? '\n(No app skill for this app yet: if you have to work out how it behaves, record the reusable part with app_skill append when you are done.)' : ''
+    let seen = told.get(session)
+    if (!seen) told.set(session, seen = new Set())
+    if (seen.has(skill.id)) return ''
+    seen.add(skill.id)
+    return `\n\nYour skill notes for ${skill.app} (app_skill; correct them if they turn out wrong):\n${skill.content}`
+  }
 
   /** Put back what the task changed: re-minimize restored windows, report the ones it opened. */
   async function tidy(call: CallContext): Promise<Value> {
@@ -396,6 +418,45 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     },
     presentCall: args => card(`请求操控 · ${((args as { apps?: string[] }).apps ?? []).join('、')}`),
   }))
+
+  if (host.skills) {
+    const skills = host.skills
+    tools.push(defineTool({
+      name: 'app_skill',
+      description: `Your notes on how to operate specific apps (one skill per app, kept across sessions; the user can edit them). open_application already returns the skill of the app it opens. Use "list" to see which apps have one, "read" for an app you reach another way, and "append" / "write" to record what you worked out about an unfamiliar app: reusable operating knowledge only (where things are, shortcuts, quirks, what failed and what works), never task content, personal data or pixel coordinates (they change with the window). Keep each skill under ${SKILL_MAX_CHARS} characters; rewrite it with "write" when it gets long or wrong.`,
+      parameters: {
+        action: { type: 'string', enum: ['list', 'read', 'append', 'write'], required: true },
+        app: { type: 'string', description: 'App name, e.g. "Obsidian" (read / append / write).' },
+        content: { type: 'string', description: 'Markdown bullet points: the lines to add (append) or the whole skill (write).' },
+        summary: { type: 'string', description: 'A few words on what the skill covers, shown in the list (write, or the first append).' },
+      },
+      output,
+      isConcurrencySafe: () => false,
+      async execute(args): Promise<Value> {
+        const { action, app, content, summary } = args as { action: string; app?: string; content?: string; summary?: string }
+        if (action === 'list') {
+          const rows = skills.list()
+          return { text: rows.length === 0 ? 'No app skills yet.' : rows.map(skill => `${skill.app}${skill.summary ? ` — ${skill.summary}` : ''} (${skill.content.length} chars)`).join('\n') }
+        }
+        const name = String(app ?? '').trim()
+        if (name === '') throw new Error('app is required.')
+        if (action === 'read') {
+          const skill = skills.find(name, await computer.foreground().catch(() => undefined))
+          return { text: skill ? `Skill for ${skill.app}:\n${skill.content}` : `No skill for "${name}" yet. If you work out how this app behaves, record it with app_skill append.` }
+        }
+        const text = String(content ?? '').trim()
+        if (text === '') throw new Error('content is required.')
+        // Remember which executable the app is, so the skill is found by window later.
+        const fg = await computer.foreground().catch(() => undefined)
+        // (UWP apps all run as ApplicationFrameHost.exe: that name would match every one of them.)
+        const match = fg && !isHostWindow(fg) && appMatches(name, fg) && !/^applicationframehost/i.test(fg.exe) ? [fg.exe] : []
+        const extra = { match, ...(summary ? { summary } : {}) }
+        const saved = action === 'write' ? skills.save({ app: name, content: text, ...extra }, skills.find(name)?.id) : skills.append(name, text, extra)
+        return { text: `Skill for ${saved.app} saved (${saved.content.length} of ${SKILL_MAX_CHARS} characters).` }
+      },
+      presentCall: args => card(`应用技能 · ${({ list: '列表', read: '读取', append: '记录', write: '重写' } as Record<string, string>)[(args as { action?: string }).action ?? ''] ?? ''}${(args as { app?: string }).app ? ` · ${(args as { app?: string }).app}` : ''}`),
+    }))
+  }
 
   tools.push(defineTool({
     name: 'list_granted_applications',

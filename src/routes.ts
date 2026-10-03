@@ -8,11 +8,13 @@ import type { Settings } from './computer.js'
 import type { HelperLike } from './helper-client.js'
 import type { OverlayController } from './overlay.js'
 import type { ScreenshotCache } from './screenshots.js'
+import type { SkillStore } from './skills.js'
 
 export const STATUS_ROUTE = '/api/dsh-computer-use/status'
 export const PREVIEW_ROUTE = '/api/dsh-computer-use/preview'
 export const SCREENSHOTS_ROUTE = '/api/dsh-computer-use/screenshots'
 export const SCREENSHOTS_CLEAN_ROUTE = '/api/dsh-computer-use/screenshots/clean'
+export const SKILLS_ROUTE = '/api/dsh-computer-use/skills'
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<void>
 
@@ -83,5 +85,43 @@ export function screenshotsCleanRoute(cache: ScreenshotCache): Handler {
     } catch (error) {
       json(res, 200, { ok: false, error: error instanceof Error ? error.message : String(error) })
     }
+  }
+}
+
+async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length
+    if (size > 200_000) throw new Error('request too large')
+    chunks.push(chunk as Buffer)
+  }
+  const parsed: unknown = chunks.length === 0 ? {} : JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  return parsed !== null && typeof parsed === 'object' ? parsed as Record<string, unknown> : {}
+}
+
+/** App skills for the settings page: GET lists them; POST { op: 'save' | 'delete' | 'reset', ... } changes one. */
+export function skillsRoute(skills: SkillStore): Handler {
+  return async (req, res) => {
+    if (req.method === 'POST') {
+      const input = await body(req)
+      const id = typeof input.id === 'string' ? input.id : ''
+      try {
+        if (input.op === 'delete') skills.remove(id)
+        else if (input.op === 'reset') skills.reset(id)
+        else if (input.op === 'save') {
+          skills.save({
+            app: String(input.app ?? ''),
+            match: String(input.match ?? '').split(/[,，]/).map(item => item.trim()).filter(Boolean),
+            summary: String(input.summary ?? ''),
+            content: String(input.content ?? ''),
+          }, id || undefined)
+        } else { json(res, 400, { ok: false, error: 'unknown op' }); return }
+      } catch (error) {
+        json(res, 200, { ok: false, error: error instanceof Error ? error.message : String(error) })
+        return
+      }
+    }
+    json(res, 200, { ok: true, dir: skills.userDir, skills: skills.list() })
   }
 }

@@ -18,6 +18,7 @@
 | 你随时可以插手 | 你用键盘打字时 AI 自动暂停，停手 1.5 秒后继续（单按 Shift / Ctrl 等修饰键不算）；你切换或打开了别的窗口，AI 下一步不会盲目执行，而是先看新截图再决定。你只是点进 DSH 卡片看对话时不算切换，AI 的按键会自动回到它正在操作的窗口。鼠标移动不会触发，避免误触 |
 | 文字输入 | Unicode 直接输入，不受输入法状态影响。短文字逐字打出来；长文本默认“流式”：按段落逐段粘贴（代码块不拆开），看得到一段段出现，又不会被 Typora、Obsidian、Word 的自动补全打乱。可在设置里改成逐字输入或一次粘贴。剪贴板文本统一为 CRLF，不丢换行 |
 | 不弄乱剪贴板 | 插件写入剪贴板的内容不进 Windows 剪贴板历史（Win+V）和云剪贴板；粘贴后按原样恢复你的剪贴板（图片、文件也保留）；AI 用 `clipboard` 工具写过剪贴板的，本轮结束后自动还原（期间你自己复制了新内容则不动） |
+| 应用技能 | AI 对各个应用的操作笔记，每个应用一份 Markdown（`~/.dsh/computer-use-skills/`）。AI 摸索清楚一个不熟悉的应用后用 `app_skill` 自己记下来（只记操作规律，不记任务内容），以后 `open_application` 打开该应用时自动附带，不占系统提示。自带 Word、Obsidian、Typora、微信、QQ、记事本六份内置技能；设置页“应用技能”里可以查看、修改、删除、新建，内置技能可覆盖和恢复 |
 | 打开应用 | `open_application` 同时搜索开始菜单和桌面快捷方式（含公共桌面），便携软件也能按名字打开。已经关到系统托盘的应用（QQ、微信等）会像人一样点托盘图标把窗口叫回来（必要时先展开“显示隐藏的图标”），不会再启动第二个实例、也不会重复登录；你明确要多开时（如微信双开）AI 会用 `new_instance` 另开一个。任务结束时 AI 会收拾现场：关掉自己打开、你不再需要的窗口，`windows tidy` 把原本最小化或在托盘里的应用重新最小化 |
 | 看不见图的模型 | `ui_elements` 用 Windows UI Automation 列出可点击元素和坐标，纯文本模型也能用 |
 | 零原生依赖 | 首次使用时用 Windows 自带的 .NET Framework `csc.exe` 编译一个小 helper（约 1 秒，之后缓存），不需要 node-gyp、不受 Electron ABI 影响 |
@@ -54,6 +55,7 @@ dsh plugin --profile web add @copylee/dsh-computer-use@latest
 |---|---|
 | `computer` | 单个动作：`screenshot` `left_click` `double_click` `triple_click` `right_click` `middle_click` `mouse_move` `left_click_drag` `left_mouse_down/up` `scroll` `type` `key` `hold_key` `wait` `zoom` `cursor_position`（沿用通用 computer-use 动作命名，模型上手即会） |
 | `computer_batch` | 顺序执行多个动作，遇错即停，最后回传一张截图 |
+| `app_skill` | 应用技能：`list` 列出、`read` 读取、`append` 追加、`write` 重写某个应用的操作笔记（单份上限 4000 字） |
 | `open_application` | 按名称（“Chrome”“记事本”“微信”）、exe 路径或网址打开应用；已运行则切到前台，在托盘里则从托盘图标恢复 |
 | `windows` | 列出窗口（含进程 exe 名）、聚焦 / 最小化 / 最大化 / 还原 / 关闭 |
 | `ui_elements` | 前台窗口的 UI Automation 元素列表，坐标已换算到截图坐标系 |

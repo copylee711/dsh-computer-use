@@ -6,7 +6,7 @@ import { OverlayController, cardRect } from '../src/overlay.js'
 import { createTools } from '../src/tools.js'
 
 const SETTINGS: Settings = {
-  accessMode: 'per-app', blockedApps: [], overlay: true, overlayLabel: 'DeepSeek Harness', hostWindow: 'keep',
+  accessMode: 'per-app', blockedApps: [], overlay: true, overlayLabel: 'DeepSeek Harness', hostWindow: 'keep', cardOpacity: 80,
   maxLongEdge: 1366, maxPixels: 1_150_000, jpegQuality: 80, autoScreenshot: true, settleMs: 0, pauseOnUserInput: true, userIdleMs: 50, typingMode: 'paste',
 }
 const CHROME = { hwnd: 11, exe: 'chrome.exe', title: 'GitHub - Google Chrome', pid: 1, className: 'Chrome_WidgetWin_1', path: '', x: 0, y: 0, width: 2560, height: 1504, minimized: false, maximized: true }
@@ -300,5 +300,42 @@ describe('floating card', () => {
     expect(r.y + r.height).toBeLessThanOrEqual(1504)
     expect(r.width).toBeGreaterThanOrEqual(800)
     expect(r.width).toBeLessThanOrEqual(1120)
+  })
+})
+
+describe('open_application with tray apps', () => {
+  const QQ = { ...CHROME, hwnd: 33, exe: 'QQ.exe', title: 'QQ', tray: true }
+  const withTray = (t: ReturnType<typeof setup>, restored: unknown) => {
+    const original = t.helper.call.bind(t.helper)
+    t.helper.call = async <T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> => {
+      if (cmd === 'background') { t.helper.calls.push({ cmd, args }); return [QQ] as T }
+      if (cmd === 'tray_restore') { t.helper.calls.push({ cmd, args }); return restored as T }
+      return original<T>(cmd, args)
+    }
+  }
+
+  it('restores an app from its tray icon instead of launching a second copy', async () => {
+    const t = setup({ mode: 'allow-all' })
+    withTray(t, { icon: true, window: { ...QQ, focused: true } })
+    const result = await t.run('open_application', { name: 'QQ' })
+    expect(t.helper.calls.find(c => c.cmd === 'tray_restore')?.args.exe).toBe('QQ.exe')
+    expect(t.helper.calls.some(c => c.cmd === 'launch')).toBe(false)
+    expect(result.text).toContain('restored its window from the tray icon')
+  })
+
+  it('does not relaunch when the tray icon cannot bring the window back', async () => {
+    const t = setup({ mode: 'allow-all' })
+    withTray(t, { icon: false })
+    const result = await t.run('open_application', { name: 'qq' })
+    expect(t.helper.calls.some(c => c.cmd === 'launch')).toBe(false)
+    expect(result.text).toContain('Do not launch it again')
+  })
+
+  it('lists tray apps in windows list', async () => {
+    const t = setup({ mode: 'allow-all' })
+    withTray(t, {})
+    const result = await t.run('windows', { action: 'list' })
+    expect(result.text).toContain('system tray without a window')
+    expect(result.text).toContain('QQ.exe')
   })
 })

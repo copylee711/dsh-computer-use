@@ -13,6 +13,7 @@ export const DEFAULTS: Settings = {
   overlay: true,
   overlayLabel: 'DeepSeek Harness',
   hostWindow: 'card',
+  cardOpacity: 80,
   autoScreenshot: true,
   settleMs: 400,
   maxLongEdge: 1366,
@@ -34,7 +35,7 @@ export function resolveConfig(raw: unknown): Settings {
         : value
     }
   }
-  const num = (key: 'settleMs' | 'maxLongEdge' | 'maxPixels' | 'jpegQuality' | 'userIdleMs', min: number, max: number): number => {
+  const num = (key: 'settleMs' | 'maxLongEdge' | 'maxPixels' | 'jpegQuality' | 'userIdleMs' | 'cardOpacity', min: number, max: number): number => {
     const value = out[key]
     return typeof value === 'number' && Number.isFinite(value) ? Math.min(max, Math.max(min, Math.round(value))) : DEFAULTS[key]
   }
@@ -46,6 +47,7 @@ export function resolveConfig(raw: unknown): Settings {
     hostWindow: out.hostWindow === 'card' || out.hostWindow === 'minimize' || out.hostWindow === 'keep'
       ? out.hostWindow
       : out.minimizeHostWindow === true ? 'minimize' : DEFAULTS.hostWindow,
+    cardOpacity: num('cardOpacity', 30, 100),
     autoScreenshot: bool('autoScreenshot'),
     settleMs: num('settleMs', 0, 5000),
     maxLongEdge: num('maxLongEdge', 640, 3840),

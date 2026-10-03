@@ -31,6 +31,7 @@ export interface Config {
   overlay?: boolean
   overlayLabel?: string
   hostWindow?: HostWindowMode
+  cardOpacity?: number
   /** @deprecated replaced by hostWindow: 'minimize' */
   minimizeHostWindow?: boolean
   autoScreenshot?: boolean
@@ -68,6 +69,10 @@ export const Config: z<Config> = z.object({
   ]).default('card').volatile().i18n({
     'zh-CN': { $description: '操控期间 DeepSeek Harness 窗口怎么摆放（结束后自动恢复原尺寸和位置）' },
     'en-US': { $description: 'What to do with the DeepSeek Harness window while controlling (restored afterwards)' },
+  }),
+  cardOpacity: z.natural().min(30).max(100).default(80).volatile().i18n({
+    'zh-CN': { $description: '悬浮卡片不透明度（%）：调低可透过卡片看清下面的操作过程；鼠标停在卡片上时变为不透明' },
+    'en-US': { $description: 'Card opacity (%): lower lets you watch the work underneath; it turns opaque while the pointer rests on it' },
   }),
   typingMode: z.union([
     z.const('stream').i18n({ 'zh-CN': { $description: '流式：长文本按段落逐段粘贴，看得到一段段出现（推荐）' }, 'en-US': { $description: 'Stream: paste long text paragraph by paragraph (recommended)' } }),

@@ -17,6 +17,8 @@ export interface Settings {
   overlay: boolean
   overlayLabel: string
   hostWindow: HostWindowMode
+  /** Card opacity in percent while controlling (it turns opaque when the pointer rests on it). */
+  cardOpacity: number
   maxLongEdge: number
   maxPixels: number
   jpegQuality: number
@@ -300,6 +302,12 @@ export class Computer {
 
   async windows(): Promise<WindowInfo[]> {
     return this.helper.call<WindowInfo[]>('windows')
+  }
+
+  /** Programs running without any visible window (closed to the system tray); `tray` = has a tray icon. */
+  async backgroundApps(): Promise<Array<WindowInfo & { tray: boolean }>> {
+    const rows = await this.helper.call<Array<WindowInfo & { tray: boolean }>>('background', {}, 15_000).catch(() => [])
+    return Array.isArray(rows) ? rows : []
   }
 
   async cursor(): Promise<Point> {

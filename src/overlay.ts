@@ -19,6 +19,7 @@ export interface OverlaySettings {
   overlay: boolean
   overlayLabel: string
   hostWindow: HostWindowMode
+  cardOpacity: number
   userIdleMs: number
 }
 
@@ -50,6 +51,8 @@ export class OverlayController {
   private idleTimer: NodeJS.Timeout | undefined
   private hostWindows: Array<{ hwnd: number; mode: 'card' | 'minimize' }> = []
   private stopping = false
+  /** Opacity the card was last given, to apply setting changes while it floats. */
+  private cardOpacity = 100
   /** Paused by Esc or the pill; actions wait until resumed. */
   paused = false
   /** When the user last typed on the physical keyboard while the overlay was up (ms epoch). */
@@ -121,6 +124,10 @@ export class OverlayController {
       }
       return
     }
+    if (this.hostWindows.some(win => win.mode === 'card') && settings.cardOpacity !== this.cardOpacity) {
+      this.cardOpacity = settings.cardOpacity
+      await this.helper.call('card_opacity', { opacity: settings.cardOpacity }).catch(() => {})
+    }
     await this.status(status)
   }
 
@@ -174,7 +181,8 @@ export class OverlayController {
       const cy = main.y + main.height / 2
       const display = displays.find(d => cx >= d.x && cx < d.x + d.width && cy >= d.y && cy < d.y + d.height) ?? displays.find(d => d.primary) ?? displays[0]
       if (!display) return
-      await this.helper.call('window_card', { hwnd: main.hwnd, ...cardRect(display) })
+      this.cardOpacity = this.settings().cardOpacity
+      await this.helper.call('window_card', { hwnd: main.hwnd, opacity: this.cardOpacity, ...cardRect(display) })
       this.hostWindows = [{ hwnd: main.hwnd, mode: 'card' }]
     } catch (error) {
       this.log(`host window ${mode}: ${String(error)}`)

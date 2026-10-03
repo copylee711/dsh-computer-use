@@ -271,6 +271,9 @@ namespace DshComputerUse
                 case "clipboard_release": Clip.Release(); return null;
                 case "paste": return Input.Paste(Args.Str(r, "text", ""), Args.Bool(r, "restore", true), Args.Int(r, "waitMs", 250));
                 case "windows": return Windows.List();
+                case "background": return Windows.Background();
+                case "tray_restore": return Tray.Restore(Args.Str(r, "exe", ""));
+                case "card_opacity": CardLayer.SetOpacity(Args.Int(r, "opacity", 100)); return null;
                 case "foreground": return Windows.Describe(Native.GetForegroundWindow());
                 case "window_at": return Windows.At(Args.Int(r, "x", 0), Args.Int(r, "y", 0));
                 case "focus": return Windows.Focus(new IntPtr(Convert.ToInt64(r["hwnd"])));
@@ -283,7 +286,7 @@ namespace DshComputerUse
                 case "ui": return Uia.Elements(r);
                 case "overlay_show": Overlay.ExcludeFromCapture = Args.Bool(r, "excludeFromCapture", true); Overlay.Show(r); return null;
                 case "overlay_pause": Overlay.SetPaused(Args.Bool(r, "paused", false)); return null;
-                case "window_card": return Windows.Card(new IntPtr(Convert.ToInt64(r["hwnd"])), Args.Int(r, "x", 0), Args.Int(r, "y", 0), Args.Int(r, "width", 0), Args.Int(r, "height", 0));
+                case "window_card": CardLayer.SetOpacity(Args.Int(r, "opacity", 100)); return Windows.Card(new IntPtr(Convert.ToInt64(r["hwnd"])), Args.Int(r, "x", 0), Args.Int(r, "y", 0), Args.Int(r, "width", 0), Args.Int(r, "height", 0));
                 case "window_uncard": return Windows.Uncard(new IntPtr(Convert.ToInt64(r["hwnd"])));
                 case "overlay_status": Overlay.Status(Args.Str(r, "status", "")); return null;
                 case "overlay_hide": Overlay.Hide(); return null;
@@ -842,6 +845,47 @@ namespace DshComputerUse
     {
         public static IntPtr Hwnd = IntPtr.Zero;
         static int originalEx;
+        /** Resting alpha of the card (see-through); it turns opaque while the pointer rests on it. */
+        static byte alpha = 255;
+        static bool hot;
+        static int hiding;
+        static DateTime enteredAt = DateTime.MaxValue;
+        static System.Threading.Timer hover;
+        static readonly object Gate = new object();
+
+        public static void SetOpacity(int percent)
+        {
+            lock (Gate)
+            {
+                alpha = (byte)Math.Max(64, Math.Min(255, (int)Math.Round(Math.Max(25, Math.Min(100, percent)) * 2.55)));
+                if (alpha < 255 && hover == null) hover = new System.Threading.Timer(delegate { Track(); }, null, 150, 150);
+                Apply();
+            }
+        }
+
+        static byte Current() { return hot ? (byte)255 : alpha; }
+
+        static void Apply()
+        {
+            if (hiding == 0 && Hwnd != IntPtr.Zero && Native.IsWindow(Hwnd)) Native.SetLayeredWindowAttributes(Hwnd, 0, Current(), 2);
+        }
+
+        /** Opaque once the pointer has rested on the card for a moment (the user wants to read or click it). */
+        static void Track()
+        {
+            lock (Gate)
+            {
+                bool inside = false;
+                if (Live() && alpha < 255)
+                {
+                    Native.POINT p; Native.GetCursorPos(out p);
+                    inside = Frame(Hwnd).Contains(p.X, p.Y);
+                }
+                if (!inside) { enteredAt = DateTime.MaxValue; if (hot) { hot = false; Apply(); } return; }
+                if (enteredAt == DateTime.MaxValue) enteredAt = DateTime.UtcNow;
+                if (!hot && (DateTime.UtcNow - enteredAt).TotalMilliseconds >= 300) { hot = true; Apply(); }
+            }
+        }
 
         static bool Live()
         {
@@ -863,7 +907,7 @@ namespace DshComputerUse
             Hwnd = hwnd;
             originalEx = Native.GetWindowLong(hwnd, -20);
             Native.SetWindowLong(hwnd, -20, originalEx | 0x80000);
-            Native.SetLayeredWindowAttributes(hwnd, 0, 255, 2);
+            lock (Gate) { hot = false; enteredAt = DateTime.MaxValue; Native.SetLayeredWindowAttributes(hwnd, 0, Current(), 2); }
         }
 
         public static void Detach()
@@ -913,11 +957,17 @@ namespace DshComputerUse
             public Hidden(IntPtr hwnd)
             {
                 this.hwnd = hwnd;
-                if (hwnd != IntPtr.Zero) Native.SetLayeredWindowAttributes(hwnd, 0, 0, 2);
+                if (hwnd == IntPtr.Zero) return;
+                lock (Gate) { hiding++; Native.SetLayeredWindowAttributes(hwnd, 0, 0, 2); }
             }
             public void Dispose()
             {
-                if (hwnd != IntPtr.Zero && Native.IsWindow(hwnd)) Native.SetLayeredWindowAttributes(hwnd, 0, 255, 2);
+                if (hwnd == IntPtr.Zero) return;
+                lock (Gate)
+                {
+                    hiding--;
+                    if (hiding == 0 && Native.IsWindow(hwnd)) Native.SetLayeredWindowAttributes(hwnd, 0, Current(), 2);
+                }
             }
         }
     }
@@ -1111,7 +1161,7 @@ namespace DshComputerUse
             uint pid = 0;
             if (h != IntPtr.Zero) Native.GetWindowThreadProcessId(h, out pid);
             uint cardPid = CardLayer.Pid();
-            if (h == IntPtr.Zero || pid == (uint)Process.GetCurrentProcess().Id || (cardPid != 0 && pid == cardPid))
+            if (h == IntPtr.Zero || pid == (uint)Process.GetCurrentProcess().Id || (cardPid != 0 && pid == cardPid) || SeeThrough(pid))
             {
                 // Our own status pill is under the point (it dodges before the
                 // click): report the topmost foreign window there instead.
@@ -1121,7 +1171,7 @@ namespace DshComputerUse
                 {
                     if (!Native.IsWindowVisible(w)) return true;
                     uint p; Native.GetWindowThreadProcessId(w, out p);
-                    if (p == self || (cardPid != 0 && p == cardPid)) return true; // our overlay, the DSH card
+                    if (p == self || (cardPid != 0 && p == cardPid) || SeeThrough(p)) return true; // our overlay, the DSH card, game overlays
                     if ((Native.GetWindowLong(w, -20) & 0x20) != 0) return true; // WS_EX_TRANSPARENT
                     if (Native.IsIconic(w)) return true;
                     int cloaked;
@@ -1135,6 +1185,89 @@ namespace DshComputerUse
                 h = found;
             }
             return Describe(h);
+        }
+
+        /** Full-screen overlays that never take input themselves (NVIDIA / Xbox Game Bar...). */
+        static readonly string[] Overlays = { "nvidia overlay.exe", "nvsphelper64.exe", "gamebar.exe", "gamebarftserver.exe" };
+
+        static bool SeeThrough(uint pid)
+        {
+            if (pid == 0) return false;
+            string exe = Path.GetFileName(ExePath(pid)).ToLowerInvariant();
+            return Array.IndexOf(Overlays, exe) >= 0;
+        }
+
+        /**
+         * Apps that run without any visible window (closed to the system tray):
+         * per program, its largest hidden, titled, unowned top-level window.
+         */
+        public static List<object> Background()
+        {
+            uint self = (uint)Process.GetCurrentProcess().Id;
+            var visible = new HashSet<uint>();
+            var best = new Dictionary<uint, KeyValuePair<IntPtr, int>>();
+            Native.EnumWindowsProc cb = delegate (IntPtr h, IntPtr data)
+            {
+                uint pid; Native.GetWindowThreadProcessId(h, out pid);
+                if (pid == self || pid == 0) return true;
+                if (Native.GetWindow(h, 4) != IntPtr.Zero) return true; // owned
+                if (Native.IsWindowVisible(h))
+                {
+                    int cloaked;
+                    bool isCloaked = Native.DwmGetWindowAttribute(h, 14, out cloaked, 4) == 0 && cloaked != 0;
+                    if (!isCloaked && Native.GetWindowTextLength(h) > 0) visible.Add(pid);
+                    return true;
+                }
+                if (Native.GetWindowTextLength(h) == 0) return true;
+                var cls = new StringBuilder(256); Native.GetClassName(h, cls, cls.Capacity);
+                string c = cls.ToString();
+                if (c == "ConsoleWindowClass" || c == "IME" || c == "MSCTFIME UI" || c.StartsWith("GDI+")) return true;
+                Native.RECT rc; Native.GetWindowRect(h, out rc);
+                int area = (rc.Right - rc.Left) * (rc.Bottom - rc.Top);
+                if (rc.Right - rc.Left < 240 || rc.Bottom - rc.Top < 160) return true;
+                KeyValuePair<IntPtr, int> seen;
+                if (!best.TryGetValue(pid, out seen) || seen.Value < area) best[pid] = new KeyValuePair<IntPtr, int>(h, area);
+                return true;
+            };
+            Native.EnumWindows(cb, IntPtr.Zero);
+            GC.KeepAlive(cb);
+            // Programs whose other process shows a window are not in the background.
+            var shownExes = new HashSet<string>();
+            foreach (var pid in visible) shownExes.Add(Path.GetFileName(ExePath(pid)).ToLowerInvariant());
+            var byExe = new Dictionary<string, Dictionary<string, object>>();
+            foreach (var pair in best)
+            {
+                if (visible.Contains(pair.Key)) continue;
+                var d = Describe(pair.Value.Key);
+                string exe = ((string)d["exe"]).ToLowerInvariant();
+                if (exe.Length == 0 || shownExes.Contains(exe) || exe == "explorer.exe" || exe == "textinputhost.exe" || exe == "shellexperiencehost.exe" || exe == "searchhost.exe" || exe == "startmenuexperiencehost.exe") continue;
+                Dictionary<string, object> prev;
+                if (byExe.TryGetValue(exe, out prev) && Convert.ToInt32(prev["width"]) * Convert.ToInt32(prev["height"]) >= pair.Value.Value) continue;
+                byExe[exe] = d;
+            }
+            foreach (var d in byExe.Values) d["tray"] = Tray.HasIcon((string)d["exe"]);
+            return new List<object>(byExe.Values);
+        }
+
+        /** Visible, titled, unowned windows of these processes. */
+        public static IntPtr ShownWindowOf(HashSet<uint> pids)
+        {
+            IntPtr found = IntPtr.Zero; int bestArea = 0;
+            Native.EnumWindowsProc cb = delegate (IntPtr h, IntPtr data)
+            {
+                if (!Native.IsWindowVisible(h) || Native.GetWindowTextLength(h) == 0 || Native.GetWindow(h, 4) != IntPtr.Zero) return true;
+                uint pid; Native.GetWindowThreadProcessId(h, out pid);
+                if (!pids.Contains(pid)) return true;
+                int cloaked;
+                if (Native.DwmGetWindowAttribute(h, 14, out cloaked, 4) == 0 && cloaked != 0) return true;
+                Native.RECT rc; Native.GetWindowRect(h, out rc);
+                int area = (rc.Right - rc.Left) * (rc.Bottom - rc.Top);
+                if (area > bestArea) { bestArea = area; found = h; }
+                return true;
+            };
+            Native.EnumWindows(cb, IntPtr.Zero);
+            GC.KeepAlive(cb);
+            return found;
         }
 
         public static Dictionary<string, object> Focus(IntPtr hwnd)
@@ -1250,6 +1383,155 @@ namespace DshComputerUse
             }
             Thread.Sleep(150);
             return Describe(hwnd);
+        }
+    }
+
+    /**
+     * Bring a program that lives in the system tray back the way the user
+     * would: click its notification-area icon (opening the "show hidden icons"
+     * overflow first). Launching it again would start a second instance (QQ
+     * shows a second login), and showing its hidden window directly leaves
+     * Electron / Qt apps frozen.
+     */
+    internal static class Tray
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        struct NOTIFYICONIDENTIFIER { public int cbSize; public IntPtr hWnd; public uint uID; public Guid guidItem; }
+        [DllImport("shell32.dll")] static extern int Shell_NotifyIconGetRect(ref NOTIFYICONIDENTIFIER id, out Native.RECT rect);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string title);
+
+        static bool IconRect(IntPtr hwnd, uint id, out Rectangle rect)
+        {
+            var n = new NOTIFYICONIDENTIFIER(); n.cbSize = Marshal.SizeOf(typeof(NOTIFYICONIDENTIFIER)); n.hWnd = hwnd; n.uID = id;
+            Native.RECT rc;
+            bool ok = Shell_NotifyIconGetRect(ref n, out rc) == 0 && rc.Right > rc.Left;
+            rect = ok ? new Rectangle(rc.Left, rc.Top, rc.Right - rc.Left, rc.Bottom - rc.Top) : Rectangle.Empty;
+            return ok;
+        }
+
+        /** The icon's owner window and id: tray icons are registered on a (often hidden or message-only) window of the app. */
+        static bool Find(HashSet<uint> pids, out IntPtr owner, out uint id)
+        {
+            var windows = new List<IntPtr>();
+            Native.EnumWindowsProc cb = delegate (IntPtr h, IntPtr data)
+            {
+                uint pid; Native.GetWindowThreadProcessId(h, out pid);
+                if (pids.Contains(pid)) windows.Add(h);
+                return true;
+            };
+            Native.EnumWindows(cb, IntPtr.Zero);
+            GC.KeepAlive(cb);
+            IntPtr m = IntPtr.Zero;
+            while ((m = FindWindowEx(new IntPtr(-3), m, null, null)) != IntPtr.Zero) // HWND_MESSAGE
+            {
+                uint pid; Native.GetWindowThreadProcessId(m, out pid);
+                if (pids.Contains(pid)) windows.Add(m);
+            }
+            foreach (var h in windows)
+                for (uint i = 0; i < 128; i++)
+                {
+                    Rectangle r;
+                    if (IconRect(h, i, out r)) { owner = h; id = i; return true; }
+                }
+            owner = IntPtr.Zero; id = 0;
+            return false;
+        }
+
+        public static bool HasIcon(string exe)
+        {
+            var pids = Pids(exe);
+            IntPtr owner; uint id;
+            return pids.Count > 0 && Find(pids, out owner, out id);
+        }
+
+        static HashSet<uint> Pids(string exe)
+        {
+            var pids = new HashSet<uint>();
+            foreach (var p in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(exe))) { pids.Add((uint)p.Id); p.Dispose(); }
+            return pids;
+        }
+
+        /** The taskbar's "show hidden icons" button. */
+        static Rectangle Chevron()
+        {
+            Rectangle found = Rectangle.Empty;
+            var worker = new Thread(delegate ()
+            {
+                try
+                {
+                    var tray = AutomationElement.RootElement.FindFirst(TreeScope.Children, new PropertyCondition(AutomationElement.ClassNameProperty, "Shell_TrayWnd"));
+                    if (tray == null) return;
+                    var buttons = tray.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button));
+                    AutomationElement pick = null;
+                    foreach (AutomationElement b in buttons)
+                    {
+                        string name = b.Current.Name ?? "";
+                        if (name.Contains("隐藏的图标") || name.ToLowerInvariant().Contains("hidden icons") || b.Current.ClassName == "NotifyIconOverflowButton") { pick = b; break; }
+                    }
+                    if (pick == null)
+                        foreach (AutomationElement b in buttons)
+                            if (b.Current.ClassName == "SystemTray.NormalButton") { pick = b; break; }
+                    if (pick == null) return;
+                    var r = pick.Current.BoundingRectangle;
+                    found = new Rectangle((int)r.X, (int)r.Y, (int)r.Width, (int)r.Height);
+                }
+                catch (Exception) { }
+            });
+            worker.IsBackground = true;
+            worker.SetApartmentState(ApartmentState.MTA);
+            worker.Start();
+            worker.Join(4000);
+            return found;
+        }
+
+        static void Click(Rectangle r, int count)
+        {
+            var d = new Dictionary<string, object>();
+            d["x"] = r.X + r.Width / 2; d["y"] = r.Y + r.Height / 2; d["count"] = count;
+            using (new PassThrough()) Input.Click(d);
+        }
+
+        static IntPtr WaitShown(HashSet<uint> pids, int ms)
+        {
+            var until = DateTime.UtcNow.AddMilliseconds(ms);
+            do
+            {
+                IntPtr h = Windows.ShownWindowOf(pids);
+                if (h != IntPtr.Zero) return h;
+                Thread.Sleep(120);
+            } while (DateTime.UtcNow < until);
+            return IntPtr.Zero;
+        }
+
+        public static object Restore(string exe)
+        {
+            var result = new Dictionary<string, object>();
+            var pids = Pids(exe);
+            result["running"] = pids.Count > 0;
+            IntPtr owner; uint id;
+            if (pids.Count == 0 || !Find(pids, out owner, out id)) { result["icon"] = false; return result; }
+            result["icon"] = true;
+            Rectangle icon; IconRect(owner, id, out icon);
+            // An icon in the overflow reports the chevron's rectangle until the overflow is open.
+            Rectangle chevron = Chevron();
+            if (!chevron.IsEmpty && Math.Abs(chevron.X - icon.X) <= 2 && Math.Abs(chevron.Y - icon.Y) <= 2)
+            {
+                Click(chevron, 1);
+                Thread.Sleep(450);
+                IconRect(owner, id, out icon);
+                result["overflow"] = true;
+            }
+            Click(icon, 1);
+            IntPtr shown = WaitShown(pids, 1500);
+            if (shown == IntPtr.Zero)
+            {
+                // Some apps restore on a double click only.
+                Rectangle again;
+                if (IconRect(owner, id, out again) && !(Math.Abs(chevron.X - again.X) <= 2 && Math.Abs(chevron.Y - again.Y) <= 2)) Click(again, 2);
+                shown = WaitShown(pids, 1500);
+            }
+            if (shown != IntPtr.Zero) { result["window"] = Windows.Focus(shown); }
+            return result;
         }
     }
 

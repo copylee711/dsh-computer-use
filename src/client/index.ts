@@ -53,6 +53,7 @@ interface Draft {
   overlay: boolean
   overlayLabel: string
   hostWindow: Settings['hostWindow']
+  cardOpacity: number
   typingMode: Settings['typingMode']
   pauseOnUserInput: boolean
   userIdleMs: string
@@ -73,6 +74,7 @@ function draftFrom(value: unknown): Draft {
     overlay: s.overlay,
     overlayLabel: s.overlayLabel,
     hostWindow: s.hostWindow,
+    cardOpacity: s.cardOpacity,
     typingMode: s.typingMode,
     pauseOnUserInput: s.pauseOnUserInput,
     userIdleMs: String(s.userIdleMs),
@@ -106,6 +108,7 @@ function valuesFrom(d: Draft): Record<string, unknown> {
     overlay: d.overlay,
     overlayLabel: d.overlayLabel.trim() || DEFAULTS.overlayLabel,
     hostWindow: d.hostWindow,
+    cardOpacity: d.cardOpacity,
     typingMode: d.typingMode,
     pauseOnUserInput: d.pauseOnUserInput,
     userIdleMs: Math.round(Number(d.userIdleMs)),
@@ -350,6 +353,22 @@ function ComputerUseSection({ ctx }: { ctx: ClientContext }) {
             onChange: (value: string) => edit('hostWindow', value as Settings['hostWindow']),
           }),
           h('span', { style: { ...S.hint, fontWeight: 400 } }, '操控结束后自动恢复原尺寸和位置。'),
+        ),
+        h('div', { style: S.label },
+          '悬浮卡片透明度',
+          h(Select, {
+            label: '悬浮卡片透明度', disabled: disabled || draft.hostWindow !== 'card', value: String(draft.cardOpacity),
+            options: [
+              { value: '100', label: '不透明' },
+              { value: '90', label: '90%' },
+              { value: '80', label: '80%（默认）' },
+              { value: '70', label: '70%' },
+              { value: '60', label: '60%' },
+              { value: '50', label: '50%：最通透' },
+            ],
+            onChange: (value: string) => edit('cardOpacity', Number(value)),
+          }),
+          h('span', { style: { ...S.hint, fontWeight: 400 } }, '半透明卡片可以透过它看清下面的操作过程；鼠标停在卡片上会变回不透明，方便阅读和点击。AI 的截图本来就看不到卡片。'),
         ),
         h('div', { style: S.label },
           '文字输入方式',

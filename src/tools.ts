@@ -179,6 +179,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       const appName = /^ms-settings:/i.test(name) ? '设置' : name
       if (settings.accessMode === 'per-app' && !isUrl && computer.access.missing(call.session, [appName]).length > 0) {
         const running = (await computer.windows()).find(win => appMatches(appName, win))
+          ?? (await computer.backgroundApps()).find(win => appMatches(appName, win))
         if (!running || !computer.access.isGranted(call.session, running)) {
           throw new Error(`"${appName}" is not granted for this session. Call request_access with ["${appName}"] first.`)
         }
@@ -189,9 +190,17 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       let how: string
       const isUri = isUrl || /^[a-z][a-z0-9+.-]+:(?![\/])/i.test(name)
       const running = isUri ? undefined : (await computer.windows()).find(win => !isHostWindow(win) && appMatches(name, win))
+      // Closed to the system tray (QQ, 微信...): click its tray icon like the user
+      // would. Launching it again starts a second instance (a second login).
+      const hidden = running || isUri ? undefined : (await computer.backgroundApps()).find(win => !isHostWindow(win) && appMatches(name, win))
       if (running) {
         const result = await computer.focus(running)
         how = result.focused ? `Brought ${running.exe} ("${running.title.slice(0, 60)}") to the front.` : `Tried to bring ${running.exe} to the front, but Windows kept another window focused.`
+      } else if (hidden) {
+        const restored = await computer.helper.call<{ icon: boolean; window?: WindowInfo & { focused: boolean } }>('tray_restore', { exe: hidden.exe }, 20_000)
+        how = restored.window
+          ? `${hidden.exe} was already running in the system tray: restored its window from the tray icon (no second instance started).`
+          : `${hidden.exe} is already running in the background${restored.icon ? ' (system tray)' : ''}, but its window did not come back automatically. Open it from its notification-area icon (click ^ "show hidden icons" on the taskbar first). Do not launch it again (that starts a second instance and login), and never force its hidden window visible from a shell (Electron / Qt apps freeze).`
       } else {
         const apps = isUri ? [] : await computer.helper.call<Array<{ name: string; id: string }>>('apps', { query: name, limit: 5 }, 30_000)
         const app = apps[0]
@@ -233,6 +242,8 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       const rows = await computer.windows()
       if (action === 'list') {
         const lines = await Promise.all(rows.map(async win => `hwnd=${win.hwnd} | ${win.exe} | "${win.title.slice(0, 70)}"${win.foreground ? ' | FOREGROUND' : ''}${win.minimized ? ' | minimized' : ` | ${await computer.windowBox(win)}`}${isHostWindow(win) ? ' | (your own DeepSeek Harness chat window)' : ''}`))
+        const tray = (await computer.backgroundApps()).filter(win => win.tray && !isHostWindow(win))
+        if (tray.length > 0) lines.push(`Running in the system tray without a window (open_application restores them; never relaunch them): ${tray.map(win => `${win.exe} ("${win.title.slice(0, 30)}")`).join(', ')}`)
         return { text: lines.join('\n') || 'No windows.' }
       }
       const target = hwnd !== undefined
@@ -242,7 +253,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
         : name ? rows.find(win => !isHostWindow(win) && appMatches(name, win))
           ?? rows.find(win => !isHostWindow(win) && win.title.toLowerCase().includes(name.toLowerCase()))
           ?? rows.find(win => appMatches(name, win)) : undefined
-      if (!target) throw new Error('Window not found; call windows with action "list".')
+      if (!target) throw new Error('Window not found; call windows with action "list". An app closed to the system tray has no window: bring it back with open_application.')
       const settings = computer.settings()
       const denial = computer.access.denial(call.session, target, settings.accessMode, settings.blockedApps, action)
       // Minimizing is harmless and reversible: allowed for any window, so you can clear what is in the way.

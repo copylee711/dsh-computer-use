@@ -8,6 +8,7 @@
 import * as React from 'react'
 import { DEFAULTS, ENTRY_ID, resolveConfig } from '../settings.js'
 import type { Settings } from '../computer.js'
+import { ACCENT, ACCENT_INK, AccentPicker, installAccent } from './accent.js'
 import { registerNavIcon } from './nav-icon.js'
 import { Select, selectCss } from './select.js'
 import { SkillsCard } from './skills-card.js'
@@ -136,7 +137,7 @@ const S: Record<string, React.CSSProperties> = {
   error: { fontSize: 12, color: 'var(--dsw-alias-state-error-primary, #d33)' },
   ok: { fontSize: 12, color: 'var(--dsw-alias-state-success-primary, #2a2)' },
   actions: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' },
-  primary: { padding: '7px 16px', fontSize: 13, borderRadius: 'var(--dsw-radius-md, 8px)', border: '1px solid #D97757', background: '#D97757', color: '#fff', cursor: 'pointer' },
+  primary: { padding: '7px 16px', fontSize: 13, borderRadius: 'var(--dsw-radius-md, 8px)', border: `1px solid ${ACCENT}`, background: ACCENT, color: ACCENT_INK, cursor: 'pointer' },
   secondary: { padding: '7px 14px', fontSize: 13, borderRadius: 'var(--dsw-radius-md, 8px)', border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.3))', background: 'transparent', color: 'inherit', cursor: 'pointer' },
   statusLine: { display: 'flex', gap: 8, alignItems: 'center', fontSize: 13 },
   dot: { width: 8, height: 8, borderRadius: 4, flex: '0 0 auto' },
@@ -148,9 +149,9 @@ function Switch({ checked, disabled, label, onChange }: { checked: boolean; disa
     onClick: () => onChange(!checked),
     style: {
       flex: '0 0 auto', width: 40, height: 22, borderRadius: 11, border: 'none', padding: 2, cursor: disabled ? 'default' : 'pointer',
-      background: checked ? '#D97757' : 'var(--dsw-alias-border-l3, rgba(127,127,127,.35))', opacity: disabled ? 0.5 : 1, transition: 'background .15s',
+      background: checked ? ACCENT : 'var(--dsw-alias-border-l3, rgba(127,127,127,.35))', opacity: disabled ? 0.5 : 1, transition: 'background .15s',
     },
-  }, h('span', { style: { display: 'block', width: 18, height: 18, borderRadius: 9, background: '#fff', transform: checked ? 'translateX(18px)' : 'none', transition: 'transform .15s' } }))
+  }, h('span', { style: { display: 'block', width: 18, height: 18, borderRadius: 9, background: checked ? ACCENT_INK : '#fff', transform: checked ? 'translateX(18px)' : 'none', transition: 'transform .15s' } }))
 }
 
 function ToggleRow({ title, hint, checked, disabled, onChange }: { title: string; hint: string; checked: boolean; disabled: boolean; onChange(value: boolean): void }) {
@@ -445,12 +446,15 @@ function ComputerUseSection({ ctx }: { ctx: ClientContext }) {
       dirty ? h('span', { style: S.hint }, '有未保存的修改') : null,
       message === null ? null : h('span', { style: message.kind === 'ok' ? S.ok : S.error }, message.text),
     ),
+
+    h(AccentPicker, null),
   )
 }
 
 export const inject = ['slots', 'remote', 'remote.settings']
 
 export function apply(ctx: ClientContext): void {
+  ctx.effect(() => installAccent(), 'computer-use: accent colour')
   ctx.effect(() => registerNavIcon('电脑控制'), 'computer-use: settings nav icon')
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',

@@ -27,3 +27,10 @@ describe('key parsing', () => {
     expect(parseModifiers(undefined)).toEqual([])
   })
 })
+
+describe('two-word key names', () => {
+  it('reads "Page Down" as one key', () => {
+    expect(parseKeys('Page Down')).toEqual([[0x22]])
+    expect(parseKeys('shift+Page Up')).toEqual([[0x10, 0x21]])
+  })
+})

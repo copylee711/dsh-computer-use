@@ -188,7 +188,7 @@ describe('foreground takeover', () => {
   it('skips the next action when another window came to the front since the last look', async () => {
     const t = setup({ mode: 'allow-all' })
     await t.run('computer', { action: 'screenshot' })
-    t.helper.foreground = { ...CHROME, hwnd: 99, exe: 'Notepad.exe', title: '新建文本文档' }
+    t.helper.foreground = { ...CHROME, hwnd: 99, pid: 2, exe: 'Notepad.exe', title: '新建文本文档' }
     const value = await t.run('computer', { action: 'left_click', coordinate: [100, 100] })
     expect(value.text).toMatch(/foreground window changed to Notepad\.exe/)
     expect(t.helper.calls.some(c => c.cmd === 'click')).toBe(false)
@@ -394,6 +394,25 @@ describe('progress card', () => {
     expect(helper.calls.some(c => c.cmd === 'window_cmd' && c.args.op === 'minimize')).toBe(true)
     overlay.stream(agent, { type: 'chunk', chunk: { type: 'reasoning-delta', text: '找群' } })
     await new Promise(resolve => setTimeout(resolve, 120))
-    expect(helper.calls.filter(c => c.cmd === 'pet_update').at(-1)?.args).toEqual({ text: '先打开微信', activity: '思考：找群' })
+    expect(helper.calls.filter(c => c.cmd === 'pet_update').at(-1)?.args).toEqual({ text: '先打开微信', thinking: '找群', steps: ['打开 微信'], thinkingLatest: true })
+    await overlay.status('点击 (10, 20)')
+    await new Promise(resolve => setTimeout(resolve, 120))
+    expect(helper.calls.filter(c => c.cmd === 'pet_update').at(-1)?.args).toMatchObject({ steps: ['打开 微信', '点击 (10, 20)'], thinkingLatest: false })
+  })
+
+  it('sends instructions typed into the card to the agent, and says done at the end', async () => {
+    const helper = new FakeHelper()
+    const settings = { ...SETTINGS, hostWindow: 'pet' as const }
+    const overlay = new OverlayController(helper, () => settings, () => {})
+    const agent = { cancel: () => {} }
+    const sent: string[] = []
+    overlay.onMessage = (who, text) => { if (who === agent) sent.push(text) }
+    overlay.stream(agent, { type: 'start' })
+    await overlay.begin(agent, '打开 Word')
+    helper.emit({ event: 'message', reason: '保存到 D 盘' })
+    expect(sent).toEqual(['保存到 D 盘'])
+    await overlay.end(agent)
+    expect(helper.calls.some(c => c.cmd === 'pet_finish')).toBe(true)
+    expect(helper.calls.some(c => c.cmd === 'overlay_hide')).toBe(false)
   })
 })

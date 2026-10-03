@@ -213,7 +213,9 @@ export class Computer {
   }
 
   private async remember(): Promise<void> {
-    this.seen = await this.foreground().catch(() => undefined)
+    const now = await this.foreground().catch(() => undefined)
+    // A transient window (IME, the card's instruction box) is not where the agent works.
+    if (!now || !isTransientShell(now)) this.seen = now
   }
 
   /**
@@ -224,7 +226,8 @@ export class Computer {
     const seen = this.seen
     if (!seen) return undefined
     const now = await this.foreground().catch(() => undefined)
-    return now && now.hwnd !== seen.hwnd ? now : undefined
+    // The same program swapping windows (Word's start screen becoming the document) is the app, not the user.
+    return now && now.hwnd !== seen.hwnd && now.pid !== seen.pid ? now : undefined
   }
 
   private async capture(rect: { x: number; y: number; width: number; height: number }, out: Size, options: { mark?: boolean; compare?: boolean; threshold?: number } = {}): Promise<Shot | undefined> {

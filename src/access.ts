@@ -65,7 +65,8 @@ export function sameApp(a: string, b: string): boolean {
  */
 export function isTransientShell(win: WindowLike & { className?: string }): boolean {
   const exe = win.exe.toLowerCase()
-  if (exe === 'textinputhost.exe') return true
+  // The IME candidate window, and our own instruction box on the progress card.
+  if (exe === 'textinputhost.exe' || exe === 'cu-helper.exe') return true
   return exe === 'explorer.exe' && (win.className === 'XamlExplorerHostIslandWindow' || /贴靠助手|snap assist/i.test(win.title))
 }
 

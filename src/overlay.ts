@@ -39,8 +39,14 @@ const TOOL_NAMES: Record<string, string> = {
   read: '读取文件', write: '写入文件', edit: '编辑文件', web_search: '搜索网页', web_fetch: '读取网页', todo_write: '更新待办',
 }
 
-/** Card text kept per line: the card shows the tail of it. */
-const KEEP = 400
+/** Reply text kept for the card (the expanded card shows its last lines). */
+const KEEP_TEXT = 2000
+/** Thinking kept for the card's one-line view. */
+const KEEP_THINKING = 300
+/** Recent steps on the card's timeline. */
+const KEEP_STEPS = 8
+/** How long the "done" card stays up after a run (longer while the pointer rests on it). */
+const FINISH_HOLD_MS = 4000
 
 export interface OverlaySettings {
   overlay: boolean
@@ -81,11 +87,15 @@ export class OverlayController {
   /** Progress card lines: the reply as it streams, and what the agent is doing. */
   private streamAgent: unknown
   private text = ''
-  private activity = ''
-  private reasoning = ''
+  private thinking = ''
+  /** Recent steps (tool actions), oldest first. */
+  private steps: string[] = []
+  /** Whether the agent is thinking now (newer than the last step). */
+  private thinkingLatest = false
   private freshAttempt = true
   private pushTimer: NodeJS.Timeout | undefined
-  private pushedActivity = ''
+  /** An instruction the user typed into the progress card. */
+  onMessage: ((agent: CancellableAgent, text: string) => void) | undefined
   /** Called when control starts (before the first action), e.g. to remember the window layout. */
   onStart: (() => Promise<void>) | undefined
   /** Opacity the card was last given, to apply setting changes while it floats. */
@@ -109,6 +119,12 @@ export class OverlayController {
       else if (event.event === 'pause') this.paused = true
       else if (event.event === 'resume') this.paused = false
       else if (event.event === 'user_input') { this.lastUserInput = Date.now(); this.lastUserKey = event.reason ?? '' }
+      else if (event.event === 'message' && event.reason) {
+        const agent = this.agent
+        if (!agent) return
+        this.step(`你：${event.reason}`)
+        this.onMessage?.(agent, event.reason)
+      }
     })
   }
 
@@ -154,8 +170,9 @@ export class OverlayController {
       await this.shrinkHost(settings.hostWindow)
       const pet = settings.hostWindow === 'pet'
       if (settings.overlay || pet) {
-        if (this.streamAgent !== agent) { this.text = ''; this.activity = '' }
-        this.pushedActivity = status
+        if (this.streamAgent !== agent) { this.text = ''; this.thinking = '' }
+        this.steps = status ? [status] : []
+        this.thinkingLatest = false
         await this.helper.call('overlay_show', {
           label: pet ? `${settings.overlayLabel || 'DeepSeek Harness'} 正在操控` : `${settings.overlayLabel || 'DeepSeek Harness'} 正在操控你的电脑`,
           status,
@@ -165,7 +182,7 @@ export class OverlayController {
           glow: settings.overlay,
           pet,
           petOpacity: settings.cardOpacity,
-          text: this.text.slice(-KEEP),
+          text: this.text,
         }).catch(error => this.log(`overlay: ${String(error)}`))
       }
       return
@@ -180,35 +197,40 @@ export class OverlayController {
 
   async status(status: string): Promise<void> {
     const settings = this.settings()
-    if (!this.visible || !(settings.overlay || settings.hostWindow === 'pet')) return
-    this.activity = status
-    this.pushedActivity = status
-    await this.helper.call('overlay_status', { status }).catch(() => {})
+    if (!this.visible) return
+    if (settings.hostWindow === 'pet') { this.step(status); return }
+    if (settings.overlay) await this.helper.call('overlay_status', { status }).catch(() => {})
+  }
+
+  /** One more step on the card's timeline. */
+  private step(text: string): void {
+    const line = plainLine(text).trim()
+    if (line === '' || this.steps.at(-1) === line) return
+    this.steps = [...this.steps, line].slice(-KEEP_STEPS)
+    this.thinkingLatest = false
+    this.schedulePush()
   }
 
   /** Live model output (DSH agent/assistant-stream) for the progress card. */
   stream(agent: unknown, frame: StreamFrame): void {
-    if (agent !== this.streamAgent) { this.streamAgent = agent; this.text = ''; this.activity = ''; this.reasoning = '' }
-    if (frame.type === 'start') { this.freshAttempt = true; this.reasoning = ''; return }
+    if (agent !== this.streamAgent) { this.streamAgent = agent; this.text = ''; this.thinking = ''; this.steps = [] }
+    if (frame.type === 'start') { this.freshAttempt = true; this.thinking = ''; return }
     const chunk = frame.type === 'chunk' ? frame.chunk : undefined
     if (!chunk) return
     if (chunk.type === 'text-delta' && chunk.text) {
       if (this.freshAttempt) { this.text = ''; this.freshAttempt = false }
-      this.text = plainLine(this.text + chunk.text).slice(-KEEP)
+      this.text = plainLine(this.text + chunk.text).slice(-KEEP_TEXT)
     } else if (chunk.type === 'reasoning-delta' && chunk.text) {
-      this.reasoning = plainLine(this.reasoning + chunk.text).slice(-KEEP)
-      this.activity = `思考：${this.reasoning.trim()}`
-    } else if (chunk.type === 'tool-call-delta' && chunk.name) {
-      this.activity = `调用 ${TOOL_NAMES[chunk.name] ?? chunk.name}`
+      this.thinking = plainLine(this.thinking + chunk.text).slice(-KEEP_THINKING)
+      this.thinkingLatest = true
     } else return
     this.schedulePush()
   }
 
-  /** A tool of another plugin started (computer-use tools report their own status). */
+  /** A tool of another plugin started (computer-use tools report their own steps). */
   toolStarted(agent: unknown, name: string, detail: string): void {
     if (agent !== this.streamAgent) return
-    this.activity = `${TOOL_NAMES[name] ?? name}${detail ? `：${plainLine(detail)}` : ''}`
-    this.schedulePush()
+    this.step(`${TOOL_NAMES[name] ?? name}${detail ? `：${detail}` : ''}`)
   }
 
   private schedulePush(): void {
@@ -216,9 +238,9 @@ export class OverlayController {
     this.pushTimer = setTimeout(() => {
       this.pushTimer = undefined
       if (!this.visible) return
-      const changed = this.activity !== this.pushedActivity
-      this.pushedActivity = this.activity
-      void this.helper.call('pet_update', { text: this.text.slice(-KEEP), ...(changed ? { activity: this.activity.slice(-KEEP) } : {}) }).catch(() => {})
+      void this.helper.call('pet_update', {
+        text: this.text, thinking: this.thinking.trim(), steps: this.steps, thinkingLatest: this.thinkingLatest,
+      }).catch(() => {})
     }, 80)
     this.pushTimer.unref?.()
   }
@@ -232,7 +254,10 @@ export class OverlayController {
     this.paused = false
     if (!this.visible) return
     this.visible = false
-    await this.helper.call('overlay_hide').catch(() => {})
+    if (this.pushTimer) { clearTimeout(this.pushTimer); this.pushTimer = undefined }
+    // The progress card says "done" for a moment; a stop by the user hides at once.
+    if (this.settings().hostWindow === 'pet' && !this.stopping) await this.helper.call('pet_finish', { text: this.text, holdMs: FINISH_HOLD_MS }).catch(() => {})
+    else await this.helper.call('overlay_hide').catch(() => {})
     await this.restoreHost()
   }
 

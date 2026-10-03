@@ -4,6 +4,7 @@
  * through DSH approvals, and an orange "DeepSeek is using your computer"
  * overlay that a physical Esc dismisses.
  */
+import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import z from '@deepseek-ai/schemastery'
@@ -229,6 +230,13 @@ export function apply(ctx: Context, config: Config = {}): void {
     }
     return next()
   })
+
+  // An instruction typed into the progress card steers the running agent, like typing in DeepSeek Harness.
+  overlay.onMessage = (agent, text) => {
+    const steer = (agent as unknown as { steer?: (message: unknown) => void }).steer
+    if (typeof steer !== 'function') { log('progress card: this agent cannot take steering'); return }
+    steer.call(agent, Object.freeze({ id: randomUUID(), role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } }))
+  }
 
   // Hide the overlay when the controlling agent stops running.
   ctx.on('agent/status', ({ agent, status }) => {

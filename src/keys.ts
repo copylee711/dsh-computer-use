@@ -61,7 +61,9 @@ export function keyCode(name: string): number | undefined {
  */
 export function parseKeys(text: string): number[][] {
   const combos: number[][] = []
-  for (const chord of text.trim().split(/\s+/).filter(Boolean)) {
+  // Two-word key names ("Page Down", "Print Screen") would split into a key sequence.
+  const joined = text.trim().replace(/\b(page|print|caps|num|scroll)\s+(up|down|screen|lock)\b/gi, '$1$2')
+  for (const chord of joined.split(/\s+/).filter(Boolean)) {
     const parts = chord === '+' ? ['+'] : chord.split(/(?<!^)\+(?!$)/)
     const combo: number[] = []
     for (const part of parts) {

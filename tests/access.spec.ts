@@ -58,6 +58,7 @@ describe('access control', () => {
   it('recognises transient shell surfaces', () => {
     expect(isTransientShell({ exe: 'TextInputHost.exe', title: 'Windows 输入体验' })).toBe(true)
     expect(isTransientShell({ exe: 'explorer.exe', title: '贴靠助手' })).toBe(true)
+    expect(isTransientShell({ exe: 'cu-helper.exe', title: '' })).toBe(true) // the progress card's instruction box
     expect(isTransientShell({ exe: 'explorer.exe', title: '此电脑 - 文件资源管理器', className: 'CabinetWClass' } as never)).toBe(false)
   })
 })

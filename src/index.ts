@@ -220,10 +220,10 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   // The progress card shows the reply and the thinking / tool calls as they stream.
   ctx.on('agent/assistant-stream', ({ agent, frame }) => {
-    if (settings().hostWindow === 'pet') overlay.stream(agent, frame as unknown as StreamFrame)
+    overlay.stream(agent, frame as unknown as StreamFrame)
   })
   ctx.on('tools/pre-execute', (exec, next) => {
-    if (settings().hostWindow === 'pet' && !OWN_TOOLS.has(exec.name)) {
+    if (!OWN_TOOLS.has(exec.name)) {
       const args = (exec.arguments ?? {}) as Record<string, unknown>
       const detail = [args.command, args.description, args.query, args.path, args.url].find(value => typeof value === 'string') as string | undefined
       overlay.toolStarted(exec.agent, exec.name, (detail ?? '').split('\n')[0]!.slice(0, 120))

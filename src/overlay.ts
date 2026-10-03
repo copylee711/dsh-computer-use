@@ -59,8 +59,12 @@ export interface OverlaySettings {
 interface WindowRow { hwnd: number; exe: string; title: string; minimized: boolean; foreground?: boolean; x: number; y: number; width: number; height: number }
 interface DisplayRow { x: number; y: number; width: number; height: number; workX: number; workY: number; workWidth: number; workHeight: number; primary: boolean; dpi: number }
 
-/** Without a status change from the host, hide after this long without actions. */
-const IDLE_HIDE_MS = 90_000
+/**
+ * Fallback only (the host normally reports the agent going idle): hide after
+ * this long without any sign of life from the agent. Model output and tool
+ * starts of any plugin count, so a slow shell command does not end the run.
+ */
+const IDLE_HIDE_MS = 10 * 60_000
 /** A pause longer than this ends the tool call with a message for the model. */
 const MAX_PAUSE_MS = 25 * 60_000
 
@@ -215,6 +219,7 @@ export class OverlayController {
   stream(agent: unknown, frame: StreamFrame): void {
     if (agent !== this.streamAgent) { this.streamAgent = agent; this.text = ''; this.thinking = ''; this.steps = [] }
     if (frame.type === 'start') { this.freshAttempt = true; this.thinking = ''; return }
+    if (this.visible && agent === this.agent) this.armIdle()
     const chunk = frame.type === 'chunk' ? frame.chunk : undefined
     if (!chunk) return
     if (chunk.type === 'text-delta' && chunk.text) {
@@ -230,6 +235,7 @@ export class OverlayController {
   /** A tool of another plugin started (computer-use tools report their own steps). */
   toolStarted(agent: unknown, name: string, detail: string): void {
     if (agent !== this.streamAgent) return
+    if (this.visible && agent === this.agent) this.armIdle()
     this.step(`${TOOL_NAMES[name] ?? name}${detail ? `：${detail}` : ''}`)
   }
 

@@ -41,7 +41,7 @@ describe('settings', () => {
     const s = resolveConfig({ settleMs: 99_999, accessMode: 'nope', hostWindow: 'float' })
     expect(s.settleMs).toBe(5000)
     expect(s.accessMode).toBe('per-app')
-    expect(s.hostWindow).toBe('card')
+    expect(s.hostWindow).toBe('pet')
   })
   it('maps the old minimizeHostWindow switch to hostWindow', () => {
     expect(resolveConfig({ minimizeHostWindow: true }).hostWindow).toBe('minimize')

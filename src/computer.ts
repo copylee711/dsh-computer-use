@@ -128,7 +128,9 @@ export class Computer {
     readonly access: AccessControl,
     readonly overlay: OverlayController,
     readonly settings: () => Settings,
-  ) {}
+  ) {
+    overlay.onStart = () => this.noteStart()
+  }
 
   // ------------------------------------------------------------ displays
 
@@ -302,6 +304,30 @@ export class Computer {
 
   async windows(): Promise<WindowInfo[]> {
     return this.helper.call<WindowInfo[]>('windows')
+  }
+
+  /** Windows when control started (hwnd -> minimized), and windows brought back from the tray since. */
+  private before: Map<number, boolean> | undefined
+  private readonly fromTray = new Set<number>()
+
+  /** Remember the window layout at the start of a task, to tell what the agent opened or restored. */
+  async noteStart(): Promise<void> {
+    const rows = await this.windows().catch(() => [])
+    this.before = new Map((Array.isArray(rows) ? rows : []).map(row => [row.hwnd, row.minimized]))
+    this.fromTray.clear()
+  }
+
+  noteFromTray(hwnd: number): void {
+    this.fromTray.add(hwnd)
+  }
+
+  /** How a window relates to the layout before the task: opened by the agent, or restored from minimized / tray. */
+  origin(win: WindowInfo): 'opened' | 'minimized' | 'tray' | undefined {
+    if (this.fromTray.has(win.hwnd)) return win.minimized ? undefined : 'tray'
+    if (!this.before) return undefined
+    const was = this.before.get(win.hwnd)
+    if (was === undefined) return 'opened'
+    return was && !win.minimized ? 'minimized' : undefined
   }
 
   /** Programs running without any visible window (closed to the system tray); `tray` = has a tray icon. */

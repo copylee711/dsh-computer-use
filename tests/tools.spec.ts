@@ -339,3 +339,61 @@ describe('open_application with tray apps', () => {
     expect(result.text).toContain('QQ.exe')
   })
 })
+
+describe('tidying up after a task', () => {
+  it('marks opened / restored windows and tidy minimizes the restored ones', async () => {
+    const t = setup({ mode: 'allow-all' })
+    const NOTE = { ...CHROME, hwnd: 44, exe: 'notepad.exe', title: 'notes', minimized: true }
+    let rows: unknown[] = [CHROME, HOST, NOTE]
+    const original = t.helper.call.bind(t.helper)
+    t.helper.call = async <T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> => {
+      if (cmd === 'windows') { t.helper.calls.push({ cmd, args }); return rows as T }
+      return original<T>(cmd, args)
+    }
+    await t.run('computer', { action: 'key', text: 'ctrl+l' }) // control starts: layout remembered
+    const PPT = { ...CHROME, hwnd: 55, exe: 'POWERPNT.EXE', title: 'slides' }
+    rows = [CHROME, HOST, { ...NOTE, minimized: false }, PPT]
+    const list = await t.run('windows', { action: 'list' })
+    expect(list.text).toMatch(/notepad\.exe.*was minimized before this task/)
+    expect(list.text).toMatch(/POWERPNT\.EXE.*opened during this task/)
+    expect(list.text).not.toMatch(/chrome\.exe.*during this task/)
+    const result = await t.run('windows', { action: 'tidy' })
+    expect(t.helper.calls.find(c => c.cmd === 'window_cmd')?.args).toEqual({ hwnd: 44, op: 'minimize' })
+    expect(result.text).toContain('POWERPNT.EXE')
+  })
+
+  it('new_instance launches even when the app is running', async () => {
+    const t = setup({ mode: 'allow-all' })
+    const original = t.helper.call.bind(t.helper)
+    t.helper.call = async <T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> => {
+      if (cmd === 'apps') { t.helper.calls.push({ cmd, args }); return [{ name: 'Google Chrome', id: 'Chrome' }] as T }
+      if (cmd === 'launch') t.helper.foreground = { ...CHROME, hwnd: 99 }
+      return original<T>(cmd, args)
+    }
+    await t.run('open_application', { name: 'chrome', new_instance: true })
+    expect(t.helper.calls.some(c => c.cmd === 'launch')).toBe(true)
+    expect(t.helper.calls.some(c => c.cmd === 'focus')).toBe(false)
+  })
+})
+
+describe('progress card', () => {
+  it('plainLine flattens Markdown into one line', async () => {
+    const { plainLine } = await import('../src/overlay.js')
+    expect(plainLine('## 标题\n\n- **加粗** 和 `代码`\n[链接](http://x)\n```js\nconst a = 1\n```\n完')).toBe('标题 加粗 和 代码 链接 完')
+  })
+
+  it('streams reply text and activity to the helper while controlling', async () => {
+    const helper = new FakeHelper()
+    const settings = { ...SETTINGS, hostWindow: 'pet' as const }
+    const overlay = new OverlayController(helper, () => settings, () => {})
+    const agent = { cancel: () => {} }
+    overlay.stream(agent, { type: 'start' })
+    overlay.stream(agent, { type: 'chunk', chunk: { type: 'text-delta', text: '先打开**微信**' } })
+    await overlay.begin(agent, '打开 微信')
+    expect(helper.calls.find(c => c.cmd === 'overlay_show')?.args).toMatchObject({ pet: true, text: '先打开微信' })
+    expect(helper.calls.some(c => c.cmd === 'window_cmd' && c.args.op === 'minimize')).toBe(true)
+    overlay.stream(agent, { type: 'chunk', chunk: { type: 'reasoning-delta', text: '找群' } })
+    await new Promise(resolve => setTimeout(resolve, 120))
+    expect(helper.calls.filter(c => c.cmd === 'pet_update').at(-1)?.args).toEqual({ text: '先打开微信', activity: '思考：找群' })
+  })
+})

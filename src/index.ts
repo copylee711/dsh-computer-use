@@ -14,7 +14,7 @@ import type {} from './system-prompt-service.js'
 import { AccessControl, normalizeApp, type AccessMode } from './access.js'
 import { Computer, type CallContext, type Settings, type TypingMode } from './computer.js'
 import { HelperClient, helperAssetPath } from './helper-client.js'
-import { OverlayController, type CancellableAgent, type HostWindowMode } from './overlay.js'
+import { OverlayController, type CancellableAgent, type HostWindowMode, type StreamFrame } from './overlay.js'
 import { promptText } from './prompt.js'
 import { resolveConfig } from './settings.js'
 import { PREVIEW_ROUTE, SCREENSHOTS_CLEAN_ROUTE, SCREENSHOTS_ROUTE, STATUS_ROUTE, previewRoute, screenshotsCleanRoute, screenshotsRoute, statusRoute } from './routes.js'
@@ -63,10 +63,11 @@ export const Config: z<Config> = z.object({
     'en-US': { $description: 'Name in the pill: "<name> 正在操控你的电脑"' },
   }),
   hostWindow: z.union([
+    z.const('pet').i18n({ 'zh-CN': { $description: '最小化，改用右下角迷你进度卡片（两行滚动显示回复和思考 / 工具调用）' }, 'en-US': { $description: 'Minimize it and show a mini progress card (reply + thinking / tool calls)' } }),
     z.const('card').i18n({ 'zh-CN': { $description: '缩成右下角置顶悬浮卡片' }, 'en-US': { $description: 'Shrink to an always-on-top card' } }),
     z.const('minimize').i18n({ 'zh-CN': { $description: '最小化' }, 'en-US': { $description: 'Minimize' } }),
     z.const('keep').i18n({ 'zh-CN': { $description: '保持不变' }, 'en-US': { $description: 'Leave it as is' } }),
-  ]).default('card').volatile().i18n({
+  ]).default('pet').volatile().i18n({
     'zh-CN': { $description: '操控期间 DeepSeek Harness 窗口怎么摆放（结束后自动恢复原尺寸和位置）' },
     'en-US': { $description: 'What to do with the DeepSeek Harness window while controlling (restored afterwards)' },
   }),
@@ -190,6 +191,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
   })
   for (const tool of tools) ctx.effect(() => ctx.tools.register(tool), `computer-use: tool ${tool.name}`)
+  const OWN_TOOLS = new Set(tools.map(tool => tool.name))
 
   // request_access goes through DSH's own approval prompt.
   ctx.on('tools/pre-execute', async (exec, next) => {
@@ -213,6 +215,19 @@ export function apply(ctx: Context, config: Config = {}): void {
         'zh-CN': `允许 DeepSeek 在本次会话中操控：${missing.join('、')}？${reason ? `（${reason}）` : ''}`,
       },
     }
+  })
+
+  // The progress card shows the reply and the thinking / tool calls as they stream.
+  ctx.on('agent/assistant-stream', ({ agent, frame }) => {
+    if (settings().hostWindow === 'pet') overlay.stream(agent, frame as unknown as StreamFrame)
+  })
+  ctx.on('tools/pre-execute', (exec, next) => {
+    if (settings().hostWindow === 'pet' && !OWN_TOOLS.has(exec.name)) {
+      const args = (exec.arguments ?? {}) as Record<string, unknown>
+      const detail = [args.command, args.description, args.query, args.path, args.url].find(value => typeof value === 'string') as string | undefined
+      overlay.toolStarted(exec.agent, exec.name, (detail ?? '').split('\n')[0]!.slice(0, 120))
+    }
+    return next()
   })
 
   // Hide the overlay when the controlling agent stops running.

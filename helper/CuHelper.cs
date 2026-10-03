@@ -113,6 +113,8 @@ namespace DshComputerUse
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, IntPtr pptDst, IntPtr psize, IntPtr hdcSrc, IntPtr pptSrc, int crKey, ref BLENDFUNCTION pblend, int flags);
         [DllImport("user32.dll")] public static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity);
+        [DllImport("user32.dll")] public static extern bool ReleaseCapture();
+        [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hwnd, uint msg, IntPtr w, IntPtr l);
 
         public delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
         [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc fn, IntPtr hMod, uint threadId);
@@ -289,6 +291,7 @@ namespace DshComputerUse
                 case "window_card": CardLayer.SetOpacity(Args.Int(r, "opacity", 100)); return Windows.Card(new IntPtr(Convert.ToInt64(r["hwnd"])), Args.Int(r, "x", 0), Args.Int(r, "y", 0), Args.Int(r, "width", 0), Args.Int(r, "height", 0));
                 case "window_uncard": return Windows.Uncard(new IntPtr(Convert.ToInt64(r["hwnd"])));
                 case "overlay_status": Overlay.Status(Args.Str(r, "status", "")); return null;
+                case "pet_update": Overlay.PetUpdate(Args.Str(r, "text", ""), Args.Has(r, "activity") ? Args.Str(r, "activity", "") : null); return null;
                 case "overlay_hide": Overlay.Hide(); return null;
                 default: throw new Exception("unknown command: " + cmd);
             }
@@ -1071,24 +1074,30 @@ namespace DshComputerUse
     /** While the agent moves, clicks or scrolls, the card lets the mouse through. */
     internal sealed class PassThrough : IDisposable
     {
-        readonly IntPtr hwnd;
-        readonly int oldEx;
-        readonly bool active;
+        readonly IntPtr[] hwnds;
+        readonly int[] oldEx;
+        bool active;
 
+        /** The DSH card and our progress card let injected pointer input through. */
         public PassThrough()
         {
-            hwnd = CardLayer.Hwnd;
-            if (hwnd == IntPtr.Zero || !Native.IsWindow(hwnd)) return;
-            oldEx = Native.GetWindowLong(hwnd, -20);
-            Native.SetWindowLong(hwnd, -20, oldEx | 0x20 | 0x80000); // WS_EX_TRANSPARENT (layered already)
-            active = true;
+            hwnds = new[] { CardLayer.Hwnd, Overlay.PetHwnd };
+            oldEx = new int[hwnds.Length];
+            for (int i = 0; i < hwnds.Length; i++)
+            {
+                if (hwnds[i] == IntPtr.Zero || !Native.IsWindow(hwnds[i])) { hwnds[i] = IntPtr.Zero; continue; }
+                oldEx[i] = Native.GetWindowLong(hwnds[i], -20);
+                Native.SetWindowLong(hwnds[i], -20, oldEx[i] | 0x20 | 0x80000); // WS_EX_TRANSPARENT (layered already)
+                active = true;
+            }
         }
 
         public void Dispose()
         {
             if (!active) return;
             Thread.Sleep(60); // let the injected input reach its target first
-            if (Native.IsWindow(hwnd)) Native.SetWindowLong(hwnd, -20, oldEx);
+            for (int i = 0; i < hwnds.Length; i++)
+                if (hwnds[i] != IntPtr.Zero && Native.IsWindow(hwnds[i])) Native.SetWindowLong(hwnds[i], -20, oldEx[i]);
         }
     }
 
@@ -1245,7 +1254,10 @@ namespace DshComputerUse
                 if (byExe.TryGetValue(exe, out prev) && Convert.ToInt32(prev["width"]) * Convert.ToInt32(prev["height"]) >= pair.Value.Value) continue;
                 byExe[exe] = d;
             }
-            foreach (var d in byExe.Values) d["tray"] = Tray.HasIcon((string)d["exe"]);
+            var owners = Tray.WindowsByPid();
+            var exeOf = new Dictionary<uint, string>();
+            foreach (var pid in owners.Keys) exeOf[pid] = Path.GetFileName(ExePath(pid));
+            foreach (var d in byExe.Values) d["tray"] = Tray.HasIcon((string)d["exe"], owners, exeOf);
             return new List<object>(byExe.Values);
         }
 
@@ -1409,39 +1421,54 @@ namespace DshComputerUse
             return ok;
         }
 
-        /** The icon's owner window and id: tray icons are registered on a (often hidden or message-only) window of the app. */
-        static bool Find(HashSet<uint> pids, out IntPtr owner, out uint id)
+        /** Top-level and message-only windows per process: tray icons are registered on one of them. */
+        public static Dictionary<uint, List<IntPtr>> WindowsByPid()
         {
-            var windows = new List<IntPtr>();
-            Native.EnumWindowsProc cb = delegate (IntPtr h, IntPtr data)
+            var map = new Dictionary<uint, List<IntPtr>>();
+            Action<IntPtr> add = delegate (IntPtr h)
             {
                 uint pid; Native.GetWindowThreadProcessId(h, out pid);
-                if (pids.Contains(pid)) windows.Add(h);
-                return true;
+                List<IntPtr> list;
+                if (!map.TryGetValue(pid, out list)) map[pid] = list = new List<IntPtr>();
+                list.Add(h);
             };
+            Native.EnumWindowsProc cb = delegate (IntPtr h, IntPtr data) { add(h); return true; };
             Native.EnumWindows(cb, IntPtr.Zero);
             GC.KeepAlive(cb);
             IntPtr m = IntPtr.Zero;
-            while ((m = FindWindowEx(new IntPtr(-3), m, null, null)) != IntPtr.Zero) // HWND_MESSAGE
-            {
-                uint pid; Native.GetWindowThreadProcessId(m, out pid);
-                if (pids.Contains(pid)) windows.Add(m);
-            }
+            while ((m = FindWindowEx(new IntPtr(-3), m, null, null)) != IntPtr.Zero) add(m); // HWND_MESSAGE
+            return map;
+        }
+
+        /** The icon's owner window and id. */
+        static bool Find(HashSet<uint> pids, Dictionary<uint, List<IntPtr>> byPid, out IntPtr owner, out uint id)
+        {
+            var windows = new List<IntPtr>();
+            foreach (var pid in pids) { List<IntPtr> list; if (byPid.TryGetValue(pid, out list)) windows.AddRange(list); }
             foreach (var h in windows)
-                for (uint i = 0; i < 128; i++)
+            {
+                // Icon ids are small; scan further only on windows that look like tray hosts.
+                var cls = new StringBuilder(256); Native.GetClassName(h, cls, cls.Capacity);
+                string c = cls.ToString().ToLowerInvariant();
+                uint ids = c.Contains("tray") || c.Contains("notify") || c.Contains("icon") ? 128u : 16u;
+                for (uint i = 0; i < ids; i++)
                 {
                     Rectangle r;
                     if (IconRect(h, i, out r)) { owner = h; id = i; return true; }
                 }
+            }
             owner = IntPtr.Zero; id = 0;
             return false;
         }
 
-        public static bool HasIcon(string exe)
+        public static bool HasIcon(string exe, Dictionary<uint, List<IntPtr>> byPid, Dictionary<uint, string> exeOf)
         {
-            var pids = Pids(exe);
+            // Process.GetProcessesByName is slow; the processes owning windows are enough here.
+            var pids = new HashSet<uint>();
+            foreach (var pair in exeOf)
+                if (string.Equals(pair.Value, exe, StringComparison.OrdinalIgnoreCase)) pids.Add(pair.Key);
             IntPtr owner; uint id;
-            return pids.Count > 0 && Find(pids, out owner, out id);
+            return pids.Count > 0 && Find(pids, byPid, out owner, out id);
         }
 
         static HashSet<uint> Pids(string exe)
@@ -1509,7 +1536,7 @@ namespace DshComputerUse
             var pids = Pids(exe);
             result["running"] = pids.Count > 0;
             IntPtr owner; uint id;
-            if (pids.Count == 0 || !Find(pids, out owner, out id)) { result["icon"] = false; return result; }
+            if (pids.Count == 0 || !Find(pids, WindowsByPid(), out owner, out id)) { result["icon"] = false; return result; }
             result["icon"] = true;
             Rectangle icon; IconRect(owner, id, out icon);
             // An icon in the overflow reports the chevron's rectangle until the overflow is open.
@@ -1777,8 +1804,8 @@ namespace DshComputerUse
         static readonly List<KeyValuePair<Rectangle, string>> buttons = new List<KeyValuePair<Rectangle, string>>();
         static bool pillAtBottom;
         static string label = "", status = "", rendered = "";
-        static Image icon;
-        static string iconPath = "";
+        static Image icon, iconLight;
+        static string iconPath = "", iconLightPath = "";
         static int idleMs = 1500;
         static System.Windows.Forms.Timer timer;
         static DateTime shownAt;
@@ -1789,6 +1816,15 @@ namespace DshComputerUse
         static int lastTyping = int.MinValue / 2;
         static int lastEmit;
         static readonly object RectLock = new object();
+
+        // The progress card ("pet"): replaces the pill while DeepSeek Harness is minimized.
+        static bool petMode;
+        static LayeredForm pet;
+        public static volatile IntPtr PetHwnd = IntPtr.Zero;
+        static string petText = "", petActivity = "";
+        static Point petPos = Point.Empty;
+        static byte petAlpha = 230;
+        static bool petDragged;
 
         static void Ensure()
         {
@@ -1821,6 +1857,18 @@ namespace DshComputerUse
                 status = Args.Str(r, "status", "");
                 idleMs = Args.Int(r, "idleMs", 1500);
                 string path = Args.Str(r, "icon", "");
+                string light = Args.Str(r, "iconLight", "");
+                if (light != iconLightPath)
+                {
+                    iconLightPath = light;
+                    if (iconLight != null) { iconLight.Dispose(); iconLight = null; }
+                    try
+                    {
+                        if (light.Length > 0 && File.Exists(light))
+                            using (var raw = Image.FromFile(light)) iconLight = new Bitmap(raw);
+                    }
+                    catch (Exception) { iconLight = null; }
+                }
                 if (path != iconPath)
                 {
                     iconPath = path;
@@ -1832,7 +1880,10 @@ namespace DshComputerUse
                     }
                     catch (Exception) { icon = null; }
                 }
+                petAlpha = (byte)Math.Max(90, Math.Min(255, Args.Int(r, "petOpacity", 90) * 255 / 100));
                 if (visible) { RenderPill(); return; }
+                petMode = Args.Bool(r, "pet", false);
+                petText = Args.Str(r, "text", ""); petActivity = status;
                 pillAtBottom = false;
                 paused = false;
                 foreach (var g in glows) g.Close();
@@ -1848,7 +1899,33 @@ namespace DshComputerUse
                         glows.Add(form);
                     }
                 }
-                if (pill == null)
+                if (petMode)
+                {
+                    if (pet == null)
+                    {
+                        pet = new LayeredForm(false);
+                        pet.MouseDown += delegate (object s, MouseEventArgs e)
+                        {
+                            if (e.Button != MouseButtons.Left) return;
+                            foreach (var b in buttons) if (b.Key.Contains(e.Location)) return;
+                            // Drag the card anywhere; it keeps that place until the next run.
+                            Native.ReleaseCapture();
+                            Native.SendMessage(pet.Handle, 0xA1, new IntPtr(2), IntPtr.Zero); // WM_NCLBUTTONDOWN, HTCAPTION
+                            Native.RECT rc;
+                            if (pet != null && Native.GetWindowRect(pet.Handle, out rc)) petPos = new Point(rc.Left, rc.Top);
+                            petDragged = true;
+                        };
+                        pet.MouseUp += delegate (object s, MouseEventArgs e)
+                        {
+                            if (petDragged) { petDragged = false; return; }
+                            foreach (var b in buttons)
+                                if (b.Key.Contains(e.Location)) { Press(b.Value); break; }
+                        };
+                        pet.Show();
+                        PetHwnd = pet.Handle;
+                    }
+                }
+                else if (pill == null)
                 {
                     pill = new LayeredForm(false);
                     pill.MouseUp += delegate (object s, MouseEventArgs e)
@@ -1869,7 +1946,19 @@ namespace DshComputerUse
         public static void Status(string newStatus)
         {
             if (thread == null || !visible) return;
-            Ui(delegate { status = newStatus; RenderPill(); });
+            Ui(delegate { status = newStatus; if (petMode) petActivity = newStatus; RenderPill(); });
+        }
+
+        /** New agent output for the progress card (activity null = unchanged). */
+        public static void PetUpdate(string text, string activity)
+        {
+            if (thread == null || !visible || !petMode) return;
+            invoker.BeginInvoke((MethodInvoker)delegate
+            {
+                petText = text;
+                if (activity != null) petActivity = activity;
+                RenderPill();
+            });
         }
 
         public static void SetPaused(bool value)
@@ -1889,6 +1978,8 @@ namespace DshComputerUse
                 foreach (var g in glows) g.Close();
                 glows.Clear();
                 if (pill != null) { pill.Close(); pill = null; }
+                if (pet != null) { PetHwnd = IntPtr.Zero; pet.Close(); pet = null; }
+                petMode = false;
                 rendered = "";
                 lock (RectLock) pillRect = Rectangle.Empty;
                 RemoveHook();
@@ -1938,6 +2029,7 @@ namespace DshComputerUse
             {
                 foreach (var g in glows) g.KeepOnTop();
                 if (pill != null) pill.KeepOnTop();
+                if (pet != null) pet.KeepOnTop();
             }
         }
 
@@ -1999,8 +2091,151 @@ namespace DshComputerUse
             return main + "|" + sub + "|" + string.Join(",", actions) + "|" + pillAtBottom;
         }
 
+        static bool DarkTheme()
+        {
+            try
+            {
+                using (var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"))
+                {
+                    object v = key == null ? null : key.GetValue("AppsUseLightTheme");
+                    return v is int && (int)v == 0;
+                }
+            }
+            catch (Exception) { return false; }
+        }
+
+        /** The end of `s` that fits `width`, led by "…": a ticker that scrolls as text streams in. */
+        static string Tail(Graphics g, string s, Font font, float width, StringFormat fmt)
+        {
+            if (s.Length == 0 || g.MeasureString(s, font, 100000, fmt).Width <= width) return s;
+            int lo = 1, hi = s.Length - 1;
+            while (lo < hi)
+            {
+                int mid = (lo + hi) / 2;
+                if (g.MeasureString("…" + s.Substring(mid), font, 100000, fmt).Width <= width) hi = mid; else lo = mid + 1;
+            }
+            if (lo < s.Length && char.IsLowSurrogate(s[lo])) lo++;
+            return "…" + s.Substring(Math.Min(lo, s.Length));
+        }
+
+        static void RenderPet()
+        {
+            if (pet == null) return;
+            Rectangle work = Rectangle.Empty; float scale = 1f;
+            foreach (Dictionary<string, object> d in Screen2.Displays())
+            {
+                if (work.IsEmpty || (bool)d["primary"])
+                {
+                    work = new Rectangle((int)d["workX"], (int)d["workY"], (int)d["workWidth"], (int)d["workHeight"]);
+                    scale = (int)d["dpi"] / 96f;
+                }
+            }
+            rendered = Key();
+            bool dark = DarkTheme();
+            Color bg = dark ? Color.FromArgb(petAlpha, 32, 31, 30) : Color.FromArgb(petAlpha, 252, 252, 251);
+            Color ink = dark ? Color.FromArgb(244, 243, 241) : Color.FromArgb(31, 30, 29);
+            Color muted = dark ? Color.FromArgb(168, 165, 160) : Color.FromArgb(112, 110, 106);
+            Color edge = dark ? Color.FromArgb(60, 255, 255, 255) : Color.FromArgb(34, 0, 0, 0);
+
+            string state = paused ? "已暂停 · Esc 继续" : Typing() ? "你正在操作，已暂停" : "Esc 暂停";
+            string[] actions = paused ? new[] { "resume", "stop" } : new[] { "pause", "stop" };
+            string[] captions = paused ? new[] { "继续", "停止" } : new[] { "暂停", "停止" };
+
+            float s = scale, px = 1.333f * scale;
+            int shadow = (int)(14 * s);
+            float bodyW = 420 * s, bodyH = 104 * s, pad = 16 * s;
+            int W = (int)Math.Ceiling(bodyW) + 2 * shadow, H = (int)Math.Ceiling(bodyH) + 2 * shadow;
+            int x, y;
+            if (petPos.IsEmpty)
+            {
+                x = work.Right - (int)(16 * s) - (int)bodyW - shadow;
+                y = work.Bottom - (int)(16 * s) - (int)bodyH - shadow;
+            }
+            else { x = petPos.X; y = petPos.Y; }
+
+            using (var fHead = new Font("Microsoft YaHei UI", 8.5f * px, FontStyle.Bold, GraphicsUnit.Pixel))
+            using (var fState = new Font("Microsoft YaHei UI", 8f * px, FontStyle.Regular, GraphicsUnit.Pixel))
+            using (var fText = new Font("Microsoft YaHei UI", 10.5f * px, FontStyle.Regular, GraphicsUnit.Pixel))
+            using (var fAct = new Font("Microsoft YaHei UI", 8.5f * px, FontStyle.Regular, GraphicsUnit.Pixel))
+            using (var fBtn = new Font("Microsoft YaHei UI", 8f * px, FontStyle.Bold, GraphicsUnit.Pixel))
+            using (var bmp = new Bitmap(W, H, PixelFormat.Format32bppArgb))
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.TextRenderingHint = TextRenderingHint.AntiAlias;
+                var fmt = StringFormat.GenericTypographic;
+                fmt.FormatFlags |= StringFormatFlags.MeasureTrailingSpaces | StringFormatFlags.NoWrap;
+
+                var body = new RectangleF(shadow, shadow, bodyW, bodyH);
+                float radius = 18 * s;
+                for (int i = shadow; i > 0; i--)
+                {
+                    double f = 1.0 - (double)i / shadow;
+                    using (var path = Rounded(RectangleF.Inflate(body, i, i - 2 * s), radius + i))
+                    using (var brush = new SolidBrush(Color.FromArgb((int)(16 * f * f), 0, 0, 0))) g.FillPath(brush, path);
+                }
+                using (var path = Rounded(body, radius))
+                {
+                    using (var brush = new SolidBrush(bg)) g.FillPath(brush, path);
+                    using (var pen = new Pen(edge, Math.Max(1f, s))) g.DrawPath(pen, path);
+                }
+
+                // Header: icon, label, state, buttons.
+                float hy = body.Y + 12 * s, hh = 22 * s;
+                float iconSize = 18 * s;
+                var iconRect = new RectangleF(body.X + pad, hy + (hh - iconSize) / 2f, iconSize, iconSize);
+                Image logo = dark ? icon : (iconLight ?? icon);
+                if (logo != null) g.DrawImage(logo, iconRect);
+                else using (var brush = new SolidBrush(Accent)) g.FillEllipse(brush, RectangleF.Inflate(iconRect, -3 * s, -3 * s));
+                float tx = iconRect.Right + 8 * s;
+                SizeF headSize = g.MeasureString(label, fHead, 100000, fmt);
+                using (var b = new SolidBrush(ink)) g.DrawString(label, fHead, b, tx, hy + (hh - headSize.Height) / 2f, fmt);
+                tx += headSize.Width + 8 * s;
+
+                buttons.Clear();
+                float bx = body.Right - pad, btnH = 22 * s;
+                var btnRects = new RectangleF[captions.Length];
+                for (int i = captions.Length - 1; i >= 0; i--)
+                {
+                    SizeF size = g.MeasureString(captions[i], fBtn, 100000, fmt);
+                    float bw = size.Width + 20 * s;
+                    bx -= bw;
+                    btnRects[i] = new RectangleF(bx, hy + (hh - btnH) / 2f, bw, btnH);
+                    bool stop = actions[i] == "stop";
+                    using (var path = Rounded(btnRects[i], btnH / 2f))
+                    using (var brush = new SolidBrush(stop ? Accent : (dark ? Color.FromArgb(70, 68, 66) : Color.FromArgb(232, 230, 226)))) g.FillPath(brush, path);
+                    using (var b = new SolidBrush(stop ? Color.White : ink)) g.DrawString(captions[i], fBtn, b, bx + (bw - size.Width) / 2f, btnRects[i].Y + (btnH - size.Height) / 2f, fmt);
+                    buttons.Add(new KeyValuePair<Rectangle, string>(Rectangle.Round(btnRects[i]), actions[i]));
+                    bx -= 6 * s;
+                }
+                string st = Tail(g, state, fState, Math.Max(0, bx - tx - 6 * s), fmt);
+                SizeF stSize = g.MeasureString(st, fState, 100000, fmt);
+                using (var b = new SolidBrush(paused ? Accent : muted)) g.DrawString(st, fState, b, tx, hy + (hh - stSize.Height) / 2f, fmt);
+
+                // Line 1: the reply as it streams; line 2: thinking / tool calls.
+                float lineW = bodyW - 2 * pad;
+                string text = petText.Length > 0 ? petText : "正在操作…";
+                string shown = Tail(g, text, fText, lineW, fmt);
+                SizeF textSize = g.MeasureString(shown.Length > 0 ? shown : " ", fText, 100000, fmt);
+                float ly = body.Y + 44 * s;
+                using (var b = new SolidBrush(petText.Length > 0 ? ink : muted)) g.DrawString(shown, fText, b, body.X + pad, ly + (26 * s - textSize.Height) / 2f, fmt);
+
+                float ay = body.Y + 74 * s;
+                using (var brush = new SolidBrush(Accent)) g.FillEllipse(brush, body.X + pad, ay + 8 * s, 6 * s, 6 * s);
+                string act = Tail(g, petActivity, fAct, lineW - 14 * s, fmt);
+                SizeF actSize = g.MeasureString(act.Length > 0 ? act : " ", fAct, 100000, fmt);
+                using (var b = new SolidBrush(muted)) g.DrawString(act, fAct, b, body.X + pad + 14 * s, ay + (22 * s - actSize.Height) / 2f, fmt);
+
+                pet.SetBitmap(bmp, new Rectangle(x, y, W, H), 255);
+            }
+            pet.KeepOnTop();
+        }
+
         static void RenderPill()
         {
+            if (petMode) { RenderPet(); return; }
             if (pill == null) return;
             // The pill lives on the primary display (or the first one).
             Rectangle work = Rectangle.Empty; float scale = 1f;

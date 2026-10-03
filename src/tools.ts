@@ -32,6 +32,13 @@ function attachmentSchema() {
 interface Value { text: string; image?: AttachmentJson }
 interface AttachmentJson { attachmentId: string; mediaType: string; bytes: number; width: number; height: number; name?: string; originalDimensions?: { width: number; height: number } }
 
+/** windows list notes about the layout before the task. */
+const ORIGIN: Record<string, string> = {
+  opened: ' | opened during this task',
+  minimized: ' | was minimized before this task',
+  tray: ' | was in the system tray before this task',
+}
+
 const output = {
   schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string', required: true }, image: attachmentSchema() } },
   render: (_args: unknown, value: Value) => value.image === undefined
@@ -166,12 +173,14 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     description: 'Open an app by name (e.g. "Chrome", "记事本", "微信", "Excel"), an .exe path, or a URL, or bring it to the front if it is already running. Faster and more reliable than clicking the taskbar or Start menu. Returns a screenshot.',
     parameters: {
       name: { type: 'string', required: true, description: 'App name as shown in the Start menu, an executable path, or an http(s) URL.' },
+      new_instance: { type: 'boolean', description: 'Start another copy even though the app is already running. Only when the user explicitly asks for a second window / instance / account.' },
     },
     output,
     timeoutMs: 30 * 60_000,
     async execute(args, exec): Promise<Value> {
       const call = await host.context(exec)
       const name = String((args as { name: string }).name ?? '').trim()
+      const newInstance = (args as { new_instance?: boolean }).new_instance === true
       if (name === '') throw new Error('name is required.')
       const settings = computer.settings()
       const isUrl = /^https?:\/\//i.test(name)
@@ -189,15 +198,16 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       const before = await computer.foreground()
       let how: string
       const isUri = isUrl || /^[a-z][a-z0-9+.-]+:(?![\/])/i.test(name)
-      const running = isUri ? undefined : (await computer.windows()).find(win => !isHostWindow(win) && appMatches(name, win))
+      const running = isUri || newInstance ? undefined : (await computer.windows()).find(win => !isHostWindow(win) && appMatches(name, win))
       // Closed to the system tray (QQ, 微信...): click its tray icon like the user
       // would. Launching it again starts a second instance (a second login).
-      const hidden = running || isUri ? undefined : (await computer.backgroundApps()).find(win => !isHostWindow(win) && appMatches(name, win))
+      const hidden = running || isUri || newInstance ? undefined : (await computer.backgroundApps()).find(win => !isHostWindow(win) && appMatches(name, win))
       if (running) {
         const result = await computer.focus(running)
         how = result.focused ? `Brought ${running.exe} ("${running.title.slice(0, 60)}") to the front.` : `Tried to bring ${running.exe} to the front, but Windows kept another window focused.`
       } else if (hidden) {
         const restored = await computer.helper.call<{ icon: boolean; window?: WindowInfo & { focused: boolean } }>('tray_restore', { exe: hidden.exe }, 20_000)
+        if (restored.window) computer.noteFromTray(restored.window.hwnd)
         how = restored.window
           ? `${hidden.exe} was already running in the system tray: restored its window from the tray icon (no second instance started).`
           : `${hidden.exe} is already running in the background${restored.icon ? ' (system tray)' : ''}, but its window did not come back automatically. Open it from its notification-area icon (click ^ "show hidden icons" on the taskbar first). Do not launch it again (that starts a second instance and login), and never force its hidden window visible from a shell (Electron / Qt apps freeze).`
@@ -227,11 +237,32 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     presentCall: args => card(`打开应用 · ${(args as { name?: string }).name ?? ''}`),
   }))
 
+  /** Put back what the task changed: re-minimize restored windows, report the ones it opened. */
+  async function tidy(call: CallContext): Promise<Value> {
+    await computer.overlay.begin(call.agent, '整理窗口')
+    const rows = (await computer.windows()).filter(win => !isHostWindow(win))
+    const minimized: string[] = []
+    for (const win of rows) {
+      const origin = computer.origin(win)
+      if (origin !== 'minimized' && origin !== 'tray') continue
+      await computer.helper.call('window_cmd', { hwnd: win.hwnd, op: 'minimize' }).catch(() => {})
+      minimized.push(`${win.exe} ("${win.title.slice(0, 40)}")`)
+    }
+    const opened = rows.filter(win => computer.origin(win) === 'opened')
+    const lines = [
+      minimized.length ? `Minimized again (they were minimized or in the tray before): ${minimized.join(', ')}.` : 'Nothing to minimize again.',
+      opened.length
+        ? `Opened during this task, still open:\n${opened.map(win => `hwnd=${win.hwnd} | ${win.exe} | "${win.title.slice(0, 60)}"`).join('\n')}\nClose the ones the user does not need (windows close); keep any that shows the result they asked for.`
+        : 'No windows opened during this task are left.',
+    ]
+    return { text: lines.join('\n') }
+  }
+
   tools.push(defineTool({
     name: 'windows',
     description: 'List top-level windows (with process .exe names), or focus / minimize / maximize / restore / close one. Use it to find the right window instead of guessing from titles; the "DeepSeek Harness.exe" window is your own chat UI.',
     parameters: {
-      action: { type: 'string', enum: ['list', 'focus', 'minimize', 'maximize', 'restore', 'close'], required: true },
+      action: { type: 'string', enum: ['list', 'focus', 'minimize', 'maximize', 'restore', 'close', 'tidy'], required: true, description: 'tidy: when the task is done, minimize again every window that was minimized or in the system tray before you started, and list the windows you opened.' },
       hwnd: { type: 'integer', description: 'Window handle from list.' },
       name: { type: 'string', description: 'Alternative to hwnd: exe or title fragment.' },
     },
@@ -241,11 +272,12 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       const { action, hwnd, name } = args as { action: string; hwnd?: number; name?: string }
       const rows = await computer.windows()
       if (action === 'list') {
-        const lines = await Promise.all(rows.map(async win => `hwnd=${win.hwnd} | ${win.exe} | "${win.title.slice(0, 70)}"${win.foreground ? ' | FOREGROUND' : ''}${win.minimized ? ' | minimized' : ` | ${await computer.windowBox(win)}`}${isHostWindow(win) ? ' | (your own DeepSeek Harness chat window)' : ''}`))
+        const lines = await Promise.all(rows.map(async win => `hwnd=${win.hwnd} | ${win.exe} | "${win.title.slice(0, 70)}"${win.foreground ? ' | FOREGROUND' : ''}${win.minimized ? ' | minimized' : ` | ${await computer.windowBox(win)}`}${isHostWindow(win) ? ' | (your own DeepSeek Harness chat window)' : ''}${ORIGIN[computer.origin(win) ?? ''] ?? ''}`))
         const tray = (await computer.backgroundApps()).filter(win => win.tray && !isHostWindow(win))
         if (tray.length > 0) lines.push(`Running in the system tray without a window (open_application restores them; never relaunch them): ${tray.map(win => `${win.exe} ("${win.title.slice(0, 30)}")`).join(', ')}`)
         return { text: lines.join('\n') || 'No windows.' }
       }
+      if (action === 'tidy') return tidy(call)
       const target = hwnd !== undefined
         ? rows.find(win => win.hwnd === hwnd)
         // By name: the program first, then a title match; DeepSeek Harness's own
@@ -271,7 +303,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       const shot = await computer.after([{ action: 'key' }], call)
       return withShot(host, shot ? text : `${text} ${await computer.describeForeground()}`, shot, call)
     },
-    presentCall: args => card(`窗口 · ${(args as { action?: string }).action ?? ''}`),
+    presentCall: args => card((args as { action?: string }).action === 'tidy' ? '整理窗口' : `窗口 · ${(args as { action?: string }).action ?? ''}`),
   }))
 
   tools.push(defineTool({

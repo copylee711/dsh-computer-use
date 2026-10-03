@@ -349,15 +349,15 @@ function ComputerUseSection({ ctx }: { ctx: ClientContext }) {
           'DeepSeek Harness 窗口',
           h(Select, {
             label: 'DeepSeek Harness 窗口', disabled, value: draft.hostWindow,
-            options: [{ value: 'card', label: '缩成右下角置顶悬浮卡片' }, { value: 'minimize', label: '最小化' }, { value: 'keep', label: '保持不变' }],
+            options: [{ value: 'pet', label: '迷你进度卡片（推荐）' }, { value: 'card', label: '缩成右下角置顶悬浮卡片' }, { value: 'minimize', label: '最小化' }, { value: 'keep', label: '保持不变' }],
             onChange: (value: string) => edit('hostWindow', value as Settings['hostWindow']),
           }),
-          h('span', { style: { ...S.hint, fontWeight: 400 } }, '操控结束后自动恢复原尺寸和位置。'),
+          h('span', { style: { ...S.hint, fontWeight: 400 } }, draft.hostWindow === 'pet' ? 'DSH 最小化，右下角显示迷你卡片：一行滚动显示回复正文，一行显示思考和工具调用；可拖动，有暂停 / 停止按钮。结束后自动恢复。' : '操控结束后自动恢复原尺寸和位置。'),
         ),
         h('div', { style: S.label },
           '悬浮卡片透明度',
           h(Select, {
-            label: '悬浮卡片透明度', disabled: disabled || draft.hostWindow !== 'card', value: String(draft.cardOpacity),
+            label: '悬浮卡片透明度', disabled: disabled || (draft.hostWindow !== 'card' && draft.hostWindow !== 'pet'), value: String(draft.cardOpacity),
             options: [
               { value: '100', label: '不透明' },
               { value: '90', label: '90%' },

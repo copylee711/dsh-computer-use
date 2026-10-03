@@ -12,7 +12,7 @@ export const DEFAULTS: Settings = {
   accessMode: 'per-app',
   overlay: true,
   overlayLabel: 'DeepSeek Harness',
-  hostWindow: 'card',
+  hostWindow: 'pet',
   cardOpacity: 80,
   autoScreenshot: true,
   settleMs: 400,
@@ -44,7 +44,7 @@ export function resolveConfig(raw: unknown): Settings {
     accessMode: out.accessMode === 'allow-all' || out.accessMode === 'per-app' ? out.accessMode : DEFAULTS.accessMode,
     overlay: bool('overlay'),
     overlayLabel: typeof out.overlayLabel === 'string' && out.overlayLabel.trim() !== '' ? out.overlayLabel.trim().slice(0, 40) : DEFAULTS.overlayLabel,
-    hostWindow: out.hostWindow === 'card' || out.hostWindow === 'minimize' || out.hostWindow === 'keep'
+    hostWindow: out.hostWindow === 'pet' || out.hostWindow === 'card' || out.hostWindow === 'minimize' || out.hostWindow === 'keep'
       ? out.hostWindow
       : out.minimizeHostWindow === true ? 'minimize' : DEFAULTS.hostWindow,
     cardOpacity: num('cardOpacity', 30, 100),

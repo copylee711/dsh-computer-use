@@ -78,6 +78,17 @@ function card(title: string): ToolCallView {
 
 const coordinate = { type: 'array', items: { type: 'number' }, description: '[x, y] in pixels of the latest screenshot.' } as const
 
+/** Reads what a window says through UI Automation: exact text, no image. */
+async function windowText(computer: Computer, hwnd: number | undefined, tail: number | undefined): Promise<string> {
+  const result = await computer.helper.call<WindowInfo & { text: string; length: number; truncated: boolean; source: string }>('text', {
+    ...(hwnd === undefined ? {} : { hwnd }), tail: Math.min(20_000, Math.max(200, Math.round(tail ?? 4000))),
+  }, 20_000)
+  const head = `${result.exe} — "${String(result.title ?? '').slice(0, 80)}"`
+  if (!result.text || result.source === 'none') return `${head}: this window exposes no readable text; use a screenshot.`
+  const part = result.truncated ? `last ${result.text.length} of ${result.length} characters` : `${result.length} characters`
+  return `${head}: ${part}${result.source === 'labels' ? ' (visible labels, top to bottom)' : ''}.\n${result.text}`
+}
+
 const actionProperties = {
   action: { type: 'string', enum: [...ACTIONS], required: true, description: 'What to do.' },
   coordinate,
@@ -86,11 +97,14 @@ const actionProperties = {
   modifiers: { type: 'string', description: 'Modifier keys held during a click or scroll, e.g. "shift" or "ctrl+shift".' },
   scroll_direction: { type: 'string', enum: ['up', 'down', 'left', 'right'] },
   scroll_amount: { type: 'integer', description: 'Wheel notches (default 3).' },
-  duration: { type: 'number', description: 'Seconds for wait / hold_key.' },
+  duration: { type: 'number', description: 'Seconds for wait / hold_key (with until: the timeout, default 10).' },
+  target: { type: 'string', description: 'Instead of coordinate: the visible name of a control in the foreground window or its open menu, e.g. "保存" or "按钮:保存". Works for controls that were not in your last screenshot (the item of a menu the previous step opens); waits up to 3 s for it. With type: clicks the field first.' },
+  until: { type: 'string', description: 'wait: return as soon as this is there, "window:<title or exe part>" or "target:<control name>", instead of waiting a fixed time.' },
+  gone: { type: 'boolean', description: 'wait until: wait for it to disappear instead.' },
   region: { type: 'array', items: { type: 'number' }, description: 'zoom: [x1, y1, x2, y2] in screenshot pixels.' },
 } as const
 
-const BATCH_ACTIONS = ACTIONS.filter(action => action !== 'screenshot' && action !== 'zoom')
+const BATCH_ACTIONS = ACTIONS.filter(action => action !== 'screenshot')
 
 // ------------------------------------------------------------------ tools
 
@@ -125,27 +139,36 @@ export function createTools(host: ToolHost): ToolDefinition[] {
 
   tools.push(defineTool({
     name: 'computer_batch',
-    description: 'Run several computer actions in order in one call (e.g. click a field, type, press Return), then get one screenshot. Stops at the first failing action. Use it when you are confident about the next few steps; the screen is not re-checked between actions.',
+    description: 'Run several computer actions in order in one call, then get one screenshot (taken once the screen settles, so do not end with a wait). Stops at the first failing action and shows you the screen. The screen is not shown to you between actions, so for steps whose target only appears along the way (a menu item, a dialog button) use target instead of coordinate, and wait with until for a window or control to appear. Example: [key "ctrl+s", wait until "window:另存为", type target "文件名" text "C:\\a.txt", left_click target "保存"].',
     parameters: {
       actions: {
-        type: 'array', required: true, description: 'Ordered actions, same fields as the computer tool (screenshot and zoom are not allowed here).',
+        type: 'array', required: true, description: 'Ordered actions, same fields as the computer tool. zoom is allowed only as the last action (you get the zoomed region instead of the full screenshot).',
         items: { type: 'object', additionalProperties: false, properties: { ...actionProperties, action: { ...actionProperties.action, enum: BATCH_ACTIONS } } },
       },
+      finish: { type: 'string', enum: ['screenshot', 'text', 'none'], description: 'What to return after the actions: screenshot (default), text (what the foreground window says, read as text: cheaper and exact when you only need the words), or none.' },
     },
     output,
     timeoutMs: 30 * 60_000,
     async execute(args, exec): Promise<Value> {
       const call = await host.context(exec)
       const actions = (args as { actions: ActionInput[] }).actions
+      const finish = (args as { finish?: string }).finish ?? 'screenshot'
+      let zoomed: Shot | undefined
       if (!Array.isArray(actions) || actions.length === 0) throw new Error('actions must be a non-empty array.')
       if (actions.length > 30) throw new Error('At most 30 actions per batch.')
       const lines: string[] = []
       let failure: string | undefined
       for (const [index, input] of actions.entries()) {
-        if (input.action === 'screenshot' || input.action === 'zoom') { failure = `#${index + 1} ${input.action}: not allowed in a batch.`; break }
+        if (input.action === 'screenshot' || (input.action === 'zoom' && index !== actions.length - 1)) {
+          failure = `#${index + 1} ${input.action}: ${input.action === 'zoom' ? 'only allowed as the last action of a batch' : 'not allowed in a batch'}.`
+          break
+        }
         try {
           const stepStart = Date.now()
+          // The zoom is of what the earlier actions left on screen, once it has settled.
+          if (input.action === 'zoom' && index > 0) await computer.settle(call.signal)
           const outcome = await computer.run(input, call)
+          if (input.action === 'zoom') zoomed = outcome.image
           if (outcome.skipped) { failure = `#${index + 1} ${input.action} skipped: the user was typing on the keyboard. Re-check the screen before continuing.`; break }
           lines.push(`#${index + 1} ${outcome.text}`)
           await sleep(60, undefined, { signal: call.signal })
@@ -160,12 +183,21 @@ export function createTools(host: ToolHost): ToolDefinition[] {
         }
       }
       const done = lines.join('\n')
-      const shot = call.vision && computer.settings().autoScreenshot
-        ? await computer.settle(call.signal).then(() => computer.freshShot())
-        : undefined
       const summary = failure === undefined
         ? `All ${actions.length} actions done.\n${done}`
         : `Stopped: ${failure}${done ? `\nCompleted before it:\n${done}` : ''}\nRemaining actions were skipped.`
+      if (zoomed !== undefined && failure === undefined) return withShot(host, summary, zoomed, call)
+      // A failed batch always shows the screen: the model has to see where it stopped.
+      if (failure === undefined && finish === 'none') return { text: `${summary}\n${await computer.describeForeground()}` }
+      if (failure === undefined && finish === 'text') {
+        await computer.settle(call.signal)
+        return { text: `${summary}\n${await windowText(computer, undefined, undefined).catch(error => `Could not read the window text: ${error instanceof Error ? error.message : String(error)}`)}` }
+      }
+      // A batch that ends with a wait has already waited for the screen: do not wait a second time.
+      const waited = failure === undefined && actions[actions.length - 1]?.action === 'wait'
+      const shot = call.vision && computer.settings().autoScreenshot
+        ? await (waited ? Promise.resolve() : computer.settle(call.signal)).then(() => computer.freshShot())
+        : undefined
       return withShot(host, shot === undefined ? `${summary}\n${await computer.describeForeground()}` : summary, shot, call)
     },
     presentCall: args => card(`电脑操作 · 批量 ${(args as { actions?: unknown[] }).actions?.length ?? 0} 步`),
@@ -182,8 +214,18 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     timeoutMs: 30 * 60_000,
     async execute(args, exec): Promise<Value> {
       const call = await host.context(exec)
-      const name = String((args as { name: string }).name ?? '').trim()
-      const newInstance = (args as { new_instance?: boolean }).new_instance === true
+      const text = await openApp(String((args as { name: string }).name ?? ''), (args as { new_instance?: boolean }).new_instance === true, call)
+      await computer.settle(call.signal)
+      const shot = call.vision ? await computer.screenshot() : undefined
+      return withShot(host, text, shot, call)
+    },
+    presentCall: args => card(`打开应用 · ${(args as { name?: string }).name ?? ''}`),
+  }))
+
+  /** Open an app or bring it forward; returns what happened, the foreground window and the app's skill notes. */
+  async function openApp(rawName: string, newInstance: boolean, call: CallContext): Promise<string> {
+    {
+      const name = rawName.trim()
       if (name === '') throw new Error('name is required.')
       const settings = computer.settings()
       const isUrl = /^https?:\/\//i.test(name)
@@ -191,7 +233,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       const appName = /^ms-settings:/i.test(name) ? '设置' : name
       if (settings.accessMode === 'per-app' && !isUrl && computer.access.missing(call.session, [appName]).length > 0) {
         const running = (await computer.windows()).find(win => appMatches(appName, win))
-          ?? (await computer.backgroundApps()).find(win => appMatches(appName, win))
+          ?? (await computer.backgroundApps(false)).find(win => appMatches(appName, win))
         if (!running || !computer.access.isGranted(call.session, running)) {
           throw new Error(`"${appName}" is not granted for this session. Call request_access with ["${appName}"] first.`)
         }
@@ -204,7 +246,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       const running = isUri || newInstance ? undefined : (await computer.windows()).find(win => !isHostWindow(win) && appMatches(name, win))
       // Closed to the system tray (QQ, 微信...): click its tray icon like the user
       // would. Launching it again starts a second instance (a second login).
-      const hidden = running || isUri || newInstance ? undefined : (await computer.backgroundApps()).find(win => !isHostWindow(win) && appMatches(name, win))
+      const hidden = running || isUri || newInstance ? undefined : (await computer.backgroundApps(false)).find(win => !isHostWindow(win) && appMatches(name, win))
       if (running) {
         const result = await computer.focus(running)
         how = result.focused ? `Brought ${running.exe} ("${running.title.slice(0, 60)}") to the front.` : `Tried to bring ${running.exe} to the front, but Windows kept another window focused.`
@@ -222,12 +264,12 @@ export function createTools(host: ToolHost): ToolDefinition[] {
         how = app ? `Launched "${app.name}".` : isUrl ? `Opened ${name} in the default browser.` : `Started "${name}".`
         // Wait for the new window to take the foreground. Explorer's desktop and
         // taskbar do not count, but a File Explorer window (CabinetWClass) does.
-        for (let i = 0; i < 32; i++) {
-          await sleep(250, undefined, { signal: call.signal })
+        for (let i = 0; i < 80; i++) {
+          await sleep(100, undefined, { signal: call.signal })
           const now = await computer.foreground()
           if (now && now.hwnd !== before?.hwnd && !isHostWindow(now) && !isTransientShell(now) && (now.exe.toLowerCase() !== 'explorer.exe' || now.className === 'CabinetWClass')) break
           // The app's window is up but something transient (the IME bar) holds the foreground: bring it forward.
-          if (i >= 4 && i % 4 === 0 && !isUri) {
+          if (i >= 10 && i % 10 === 0 && !isUri) {
             const opened = (await computer.windows()).find(win => !isHostWindow(win) && appMatches(name, win))
             if (opened) { await computer.focus(opened).catch(() => undefined); break }
           }
@@ -238,12 +280,9 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       if (fg && !isHostWindow(fg) && settings.accessMode === 'per-app' && (computer.access.missing(call.session, [appName]).length === 0 || isUrl)) {
         computer.access.grant(call.session, [fg.exe])
       }
-      await computer.settle(call.signal)
-      const shot = call.vision ? await computer.screenshot() : undefined
-      return withShot(host, `${how} ${await computer.describeForeground()}${skillNote(call.session, name, fg)}`, shot, call)
-    },
-    presentCall: args => card(`打开应用 · ${(args as { name?: string }).name ?? ''}`),
-  }))
+      return `${how} ${await computer.describeForeground()}${skillNote(call.session, name, fg)}`
+    }
+  }
 
   /** Skills already handed to a session, so each is attached once. */
   const told = new Map<string, Set<string>>()
@@ -330,9 +369,11 @@ export function createTools(host: ToolHost): ToolDefinition[] {
 
   tools.push(defineTool({
     name: 'ui_elements',
-    description: 'List clickable/editable UI elements of the foreground window (or a window by hwnd) from Windows UI Automation, with center coordinates in screenshot pixels. Useful to click precisely, read values, or work without vision. Some apps (games, canvas UIs) expose little.',
+    description: 'Read the foreground window (or a window by hwnd) through Windows UI Automation. Default: its clickable/editable elements with center coordinates in screenshot pixels (to click precisely, read values, or work without vision). With text: true: what the window says as plain text (a document, a web page, a chat reply, a log) — exact and far cheaper than scrolling and zooming screenshots. Some apps (games, canvas UIs) expose little.',
     parameters: {
       hwnd: { type: 'integer', description: 'Window handle; default foreground window.' },
+      text: { type: 'boolean', description: 'Return the window\'s text content instead of the element list.' },
+      tail: { type: 'integer', description: 'text: how many characters from the end to return (default 4000, max 20000); new content is usually at the end.' },
       include_text: { type: 'boolean', description: 'Also list static text elements.' },
       max: { type: 'integer', description: 'Max elements (default 120).' },
     },
@@ -340,9 +381,10 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     timeoutMs: 30_000,
     isConcurrencySafe: () => true,
     async execute(args): Promise<Value> {
-      const { hwnd, include_text: includeText, max } = args as { hwnd?: number; include_text?: boolean; max?: number }
+      const { hwnd, include_text: includeText, max, text, tail } = args as { hwnd?: number; include_text?: boolean; max?: number; text?: boolean; tail?: number }
+      if (text === true) return { text: await windowText(computer, hwnd, tail) }
       const result = await computer.helper.call<WindowInfo & { elements: Array<{ role: string; name: string; value?: string; checked?: boolean; disabled?: boolean; x: number; y: number; width: number; height: number }> }>('ui', {
-        ...(hwnd === undefined ? {} : { hwnd }), includeText: includeText === true, maxNodes: Math.min(400, Math.max(10, max ?? 120)),
+        ...(hwnd === undefined ? {} : { hwnd }), includeText: includeText === true, popups: true, maxNodes: Math.min(400, Math.max(10, max ?? 120)),
       }, 20_000)
       const lines: string[] = []
       for (const [index, el] of result.elements.entries()) {

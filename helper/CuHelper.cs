@@ -202,6 +202,7 @@ namespace DshComputerUse
             var input = new StreamReader(Console.OpenStandardInput(), utf8);
             var parser = new JavaScriptSerializer();
             parser.MaxJsonLength = int.MaxValue;
+            Apps.Warm();
 
             var hello = new Dictionary<string, object>();
             hello["event"] = "ready"; hello["version"] = Version; hello["pid"] = Process.GetCurrentProcess().Id;
@@ -280,7 +281,7 @@ namespace DshComputerUse
                 case "clipboard_release": Clip.Release(); return null;
                 case "paste": return Input.Paste(Args.Str(r, "text", ""), Args.Bool(r, "restore", true), Args.Int(r, "waitMs", 250));
                 case "windows": return Windows.List();
-                case "background": return Windows.Background();
+                case "background": return Windows.Background(Args.Bool(r, "tray", true));
                 case "tray_restore": return Tray.Restore(Args.Str(r, "exe", ""));
                 case "card_opacity": CardLayer.SetOpacity(Args.Int(r, "opacity", 100)); return null;
                 case "foreground": return Windows.Describe(Native.GetForegroundWindow());
@@ -293,6 +294,7 @@ namespace DshComputerUse
                 case "clipboard_set": if (Args.Bool(r, "agent", false)) Clip.AgentSet(Args.Str(r, "text", "")); else Clip.Set(Args.Str(r, "text", ""), false); return null;
                 case "clipboard_restore": { var d = new Dictionary<string, object>(); d["restored"] = Clip.RestoreAgent(); return d; }
                 case "ui": return Uia.Elements(r);
+                case "text": return Uia.Text(r);
                 case "overlay_show": Overlay.ExcludeFromCapture = Args.Bool(r, "excludeFromCapture", true); Overlay.Show(r); return null;
                 case "overlay_pause": Overlay.SetPaused(Args.Bool(r, "paused", false)); return null;
                 case "window_card": CardLayer.SetOpacity(Args.Int(r, "opacity", 100)); return Windows.Card(new IntPtr(Convert.ToInt64(r["hwnd"])), Args.Int(r, "x", 0), Args.Int(r, "y", 0), Args.Int(r, "width", 0), Args.Int(r, "height", 0));
@@ -1240,7 +1242,7 @@ namespace DshComputerUse
          * Apps that run without any visible window (closed to the system tray):
          * per program, its largest hidden, titled, unowned top-level window.
          */
-        public static List<object> Background()
+        public static List<object> Background(bool withTray)
         {
             uint self = (uint)Process.GetCurrentProcess().Id;
             var visible = new HashSet<uint>();
@@ -1284,6 +1286,8 @@ namespace DshComputerUse
                 if (byExe.TryGetValue(exe, out prev) && Convert.ToInt32(prev["width"]) * Convert.ToInt32(prev["height"]) >= pair.Value.Value) continue;
                 byExe[exe] = d;
             }
+            // Looking through the notification area takes a second or more; skip it when only the list matters.
+            if (!withTray) return new List<object>(byExe.Values);
             var owners = Tray.WindowsByPid();
             var exeOf = new Dictionary<uint, string>();
             foreach (var pid in owners.Keys) exeOf[pid] = Path.GetFileName(ExePath(pid));
@@ -1596,10 +1600,28 @@ namespace DshComputerUse
     {
         static List<KeyValuePair<string, string>> cache;
         static DateTime cachedAt;
+        static readonly object Gate = new object();
+
+        /// <summary>
+        /// Listing the Start menu takes about two seconds the first time. Do it
+        /// while the model is still thinking, not inside its first open_application.
+        /// </summary>
+        public static void Warm()
+        {
+            var worker = new Thread(delegate () { try { Windows.List(); } catch (Exception) { } try { All(); } catch (Exception) { } });
+            worker.IsBackground = true;
+            worker.SetApartmentState(ApartmentState.STA);
+            worker.Start();
+        }
 
         static List<KeyValuePair<string, string>> All()
         {
-            if (cache != null && (DateTime.UtcNow - cachedAt).TotalSeconds < 120) return cache;
+            lock (Gate) { return Load(); }
+        }
+
+        static List<KeyValuePair<string, string>> Load()
+        {
+            if (cache != null && (DateTime.UtcNow - cachedAt).TotalSeconds < 600) return cache;
             var list = new List<KeyValuePair<string, string>>();
             Type t = Type.GetTypeFromProgID("Shell.Application");
             dynamic shell = Activator.CreateInstance(t);
@@ -1678,13 +1700,25 @@ namespace DshComputerUse
             IntPtr hwnd = Args.Has(r, "hwnd") ? new IntPtr(Convert.ToInt64(r["hwnd"])) : Native.GetForegroundWindow();
             int max = Args.Int(r, "maxNodes", 150);
             bool all = Args.Bool(r, "includeText", false);
+            bool popups = Args.Bool(r, "popups", false);
+            bool popupsOnly = Args.Bool(r, "popupsOnly", false);
             List<object> result = null; Exception error = null;
             var worker = new Thread(delegate ()
             {
                 try
                 {
-                    result = Collect(hwnd, max, all);
-                    if (result.Count < 4) { Thread.Sleep(400); result = Collect(hwnd, max, all); } // Chromium builds its tree lazily
+                    if (popupsOnly) result = new List<object>();
+                    else
+                    {
+                        result = Collect(hwnd, max, all);
+                        if (result.Count < 4) { Thread.Sleep(400); result = Collect(hwnd, max, all); } // Chromium builds its tree lazily
+                    }
+                    // An open menu or flyout is a window of its own, not a descendant of the one it belongs to.
+                    if (popups || popupsOnly) foreach (var extra in Popups(hwnd))
+                    {
+                        if (result.Count >= max) break;
+                        try { result.AddRange(Collect(extra, max - result.Count, all)); } catch (Exception) { }
+                    }
                 }
                 catch (Exception ex) { error = ex; }
             });
@@ -1696,6 +1730,117 @@ namespace DshComputerUse
             var d = Windows.Describe(hwnd);
             d["elements"] = result;
             return d;
+        }
+
+        /// <summary>Other visible top-level windows of the same process: menus, flyouts, dropdown lists.</summary>
+        static List<IntPtr> Popups(IntPtr hwnd)
+        {
+            var list = new List<IntPtr>();
+            uint owner; Native.GetWindowThreadProcessId(hwnd, out owner);
+            Native.EnumWindowsProc cb = delegate (IntPtr h, IntPtr data)
+            {
+                if (h == hwnd || !Native.IsWindowVisible(h) || Native.IsIconic(h)) return true;
+                uint pid; Native.GetWindowThreadProcessId(h, out pid);
+                if (pid == owner && list.Count < 6) list.Add(h);
+                return true;
+            };
+            Native.EnumWindows(cb, IntPtr.Zero);
+            GC.KeepAlive(cb);
+            return list;
+        }
+
+        /// <summary>
+        /// What a window says, as text: the document or edit control's own text
+        /// when it offers one, else its value, else the visible labels in order.
+        /// </summary>
+        public static object Text(Dictionary<string, object> r)
+        {
+            IntPtr hwnd = Args.Has(r, "hwnd") ? new IntPtr(Convert.ToInt64(r["hwnd"])) : Native.GetForegroundWindow();
+            int tail = Math.Max(200, Math.Min(20000, Args.Int(r, "tail", 4000)));
+            string text = ""; string source = "none"; Exception error = null;
+            var worker = new Thread(delegate ()
+            {
+                try { text = Read(hwnd, out source); }
+                catch (Exception ex) { error = ex; }
+            });
+            worker.IsBackground = true;
+            worker.SetApartmentState(ApartmentState.MTA);
+            worker.Start();
+            if (!worker.Join(Args.Int(r, "timeoutMs", 8000))) throw new Exception("UI Automation timed out on this window");
+            if (error != null) throw error;
+            var d = Windows.Describe(hwnd);
+            d["length"] = text.Length;
+            d["truncated"] = text.Length > tail;
+            d["text"] = text.Length > tail ? text.Substring(text.Length - tail) : text;
+            d["source"] = source;
+            return d;
+        }
+
+        const int ReadLimit = 200000;
+
+        static string Read(IntPtr hwnd, out string source)
+        {
+            var root = AutomationElement.FromHandle(hwnd);
+            var visible = new PropertyCondition(AutomationElement.IsOffscreenProperty, false);
+
+            // 1. The largest element with a text pattern: an editor's document, a browser's page.
+            var withText = root.FindAll(TreeScope.Subtree, new AndCondition(visible, new PropertyCondition(AutomationElement.IsTextPatternAvailableProperty, true)));
+            string best = ""; double bestArea = -1;
+            int looked = 0;
+            foreach (AutomationElement el in withText)
+            {
+                if (++looked > 40) break;
+                try
+                {
+                    var rect = el.Current.BoundingRectangle;
+                    double area = rect.IsEmpty ? 0 : rect.Width * rect.Height;
+                    if (area <= bestArea) continue;
+                    object pattern;
+                    if (!el.TryGetCurrentPattern(TextPattern.Pattern, out pattern)) continue;
+                    string got = ((TextPattern)pattern).DocumentRange.GetText(ReadLimit);
+                    if (got == null || got.Trim().Length == 0) continue;
+                    best = got; bestArea = area;
+                }
+                catch (Exception) { }
+            }
+            if (best.Length > 0) { source = "text"; return best; }
+
+            // 2. The longest value of an edit or document control.
+            var withValue = root.FindAll(TreeScope.Subtree, new AndCondition(visible, new PropertyCondition(AutomationElement.IsValuePatternAvailableProperty, true)));
+            looked = 0;
+            foreach (AutomationElement el in withValue)
+            {
+                if (++looked > 200) break;
+                try
+                {
+                    object pattern;
+                    if (!el.TryGetCurrentPattern(ValuePattern.Pattern, out pattern)) continue;
+                    string got = ((ValuePattern)pattern).Current.Value;
+                    if (got != null && got.Length > best.Length) best = got;
+                }
+                catch (Exception) { }
+            }
+            if (best.Trim().Length > 0) { source = "value"; return best.Length > ReadLimit ? best.Substring(best.Length - ReadLimit) : best; }
+
+            // 3. Whatever labels are showing, in tree (reading) order.
+            var cache = new CacheRequest();
+            cache.Add(AutomationElement.NameProperty);
+            cache.AutomationElementMode = AutomationElementMode.None;
+            cache.TreeScope = TreeScope.Element;
+            AutomationElementCollection labels;
+            using (cache.Activate()) { labels = root.FindAll(TreeScope.Descendants, visible); }
+            var sb = new StringBuilder();
+            string last = null;
+            foreach (AutomationElement el in labels)
+            {
+                string name = el.GetCachedPropertyValue(AutomationElement.NameProperty) as string;
+                if (string.IsNullOrEmpty(name) || name == last) continue;
+                last = name;
+                sb.Append(name).Append('\n');
+                if (sb.Length > ReadLimit) break;
+            }
+            source = sb.Length > 0 ? "labels" : "none";
+            return sb.ToString();
         }
 
         static List<object> Collect(IntPtr hwnd, int max, bool includeText)

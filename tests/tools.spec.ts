@@ -20,10 +20,14 @@ class FakeHelper implements HelperLike {
   calls: Array<{ cmd: string; args: Record<string, unknown> }> = []
   foreground = CHROME
   failOn = ''
+  /** UI Automation elements the window reports; a function lets a test change them between looks. */
+  elements: unknown[] | (() => unknown[]) = []
+  windowText = { text: '', length: 0, truncated: false, source: 'none' }
   private listeners = new Set<(event: HelperEvent) => void>()
   async call<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
     this.calls.push({ cmd, args })
     if (cmd === this.failOn) throw new Error(`${cmd} broke`)
+    if (cmd === 'ui') return { ...this.foreground, elements: typeof this.elements === 'function' ? this.elements() : this.elements } as T
     const answers: Record<string, unknown> = {
       displays: [{ x: 0, y: 0, width: 2560, height: 1600, primary: true, dpi: 192, name: 'D1' }],
       screenshot: { data: Buffer.from('jpeg').toString('base64'), width: args.outWidth, height: args.outHeight },
@@ -31,6 +35,7 @@ class FakeHelper implements HelperLike {
       window_at: this.foreground,
       windows: [CHROME, HOST],
       cursor: { x: 10, y: 10 },
+      text: { ...this.foreground, ...this.windowText },
     }
     return (answers[cmd] ?? null) as T
   }
@@ -450,5 +455,112 @@ describe('app skills in tools', () => {
     expect((await t.run('app_skill', { action: 'read', app: 'chrome' })).text).toContain('- ctrl+l 聚焦地址栏\n- ctrl+t 新标签页')
     expect((await t.run('app_skill', { action: 'list' })).text).toContain('Chrome — 地址栏')
     await expect(t.run('app_skill', { action: 'write', app: 'Chrome', content: 'x'.repeat(5000) })).rejects.toThrow(/Condense/)
+  })
+})
+
+describe('one call for a whole sequence', () => {
+  const SAVE = { role: 'Button', name: '保存(S)', x: 1000, y: 800, width: 160, height: 60 }
+
+  it('clicks a control by its name, at its centre', async () => {
+    const t = setup()
+    t.access.grant('s1', ['Chrome'])
+    t.helper.elements = [SAVE, { role: 'Button', name: '取消', x: 1200, y: 800, width: 160, height: 60 }]
+    const value = await t.run('computer', { action: 'left_click', target: '保存' })
+    const click = t.helper.calls.find(c => c.cmd === 'click')!
+    expect([click.args.x, click.args.y]).toEqual([1080, 830])
+    expect(value.text).toContain('Button "保存(S)"')
+    // Found in the window itself: the slower look through its popups is not needed.
+    expect(t.helper.calls.filter(c => c.cmd === 'ui').map(c => c.args.popupsOnly === true)).toEqual([false])
+  })
+
+  it('waits for a control that is still appearing', async () => {
+    const t = setup()
+    t.access.grant('s1', ['Chrome'])
+    let looks = 0
+    t.helper.elements = () => (++looks < 5 ? [] : [SAVE])
+    await t.run('computer', { action: 'left_click', target: '保存' })
+    // Each look reads the window, then its popups, until the control shows up.
+    expect(looks).toBe(5)
+    expect(t.helper.calls.some(c => c.cmd === 'click')).toBe(true)
+  })
+
+  it('names the candidates instead of guessing between two controls', async () => {
+    const t = setup()
+    t.access.grant('s1', ['Chrome'])
+    t.helper.elements = [SAVE, { ...SAVE, x: 100 }]
+    await expect(t.run('computer', { action: 'left_click', target: '保存' })).rejects.toThrow(/matches 2 controls.*@ \(/)
+    expect(t.helper.calls.some(c => c.cmd === 'click')).toBe(false)
+  })
+
+  it('clicks the named field before typing into it', async () => {
+    const t = setup({ typing: 'paste' })
+    t.access.grant('s1', ['Chrome'])
+    t.helper.elements = [{ role: 'Edit', name: '文件名:', x: 400, y: 600, width: 800, height: 40 }]
+    const value = await t.run('computer', { action: 'type', target: '文件名', text: 'a.txt' })
+    const order = t.helper.calls.map(c => c.cmd).filter(cmd => cmd === 'click' || cmd === 'type')
+    expect(order).toEqual(['click', 'type'])
+    expect(value.text).toContain('clicked')
+  })
+
+  it('wait until returns as soon as the window is there, and fails with a reason when it never comes', async () => {
+    const t = setup()
+    const started = Date.now()
+    const value = await t.run('computer', { action: 'wait', until: 'window:google chrome', duration: 5 })
+    expect(value.text).toContain('is there')
+    expect(Date.now() - started).toBeLessThan(1000)
+    await expect(t.run('computer', { action: 'wait', until: 'window:记事本', duration: 0.3 })).rejects.toThrow(/Timed out.*window "记事本" to appear/)
+  })
+
+  it('counts a dialog that holds the foreground as there, though the window list leaves owned windows out', async () => {
+    const t = setup()
+    t.helper.foreground = { ...CHROME, hwnd: 77, title: '另存为', className: '#32770' }
+    const value = await t.run('computer', { action: 'wait', until: 'window:另存为', duration: 3 })
+    expect(value.text).toContain('is there after 0.')
+  })
+
+  it('wait until can wait for a control to go away', async () => {
+    const t = setup()
+    let looks = 0
+    t.helper.elements = () => (++looks < 2 ? [SAVE] : [])
+    const value = await t.run('computer', { action: 'wait', until: 'target:保存', gone: true, duration: 5 })
+    expect(value.text).toContain('is gone')
+  })
+
+  it('lets a batch end with a zoom and returns that image', async () => {
+    const t = setup()
+    t.access.grant('s1', ['Chrome'])
+    const value = await t.run('computer_batch', { actions: [{ action: 'key', text: 'ctrl+l' }, { action: 'zoom', region: [0, 0, 400, 300] }] })
+    expect(value.text).toContain('All 2 actions done')
+    expect(value.image).toBeDefined()
+    expect(t.helper.calls.filter(c => c.cmd === 'screenshot')).toHaveLength(1)
+    await expect(t.run('computer_batch', { actions: [{ action: 'zoom', region: [0, 0, 400, 300] }, { action: 'key', text: 'Return' }] })).resolves.toMatchObject({ text: expect.stringContaining('only allowed as the last action') })
+  })
+
+  it('can finish a batch with the window text instead of a screenshot', async () => {
+    const t = setup()
+    t.access.grant('s1', ['Chrome'])
+    t.helper.windowText = { text: '结果：42', length: 5, truncated: false, source: 'text' }
+    const value = await t.run('computer_batch', { actions: [{ action: 'key', text: 'Return' }], finish: 'text' })
+    expect(value.text).toContain('结果：42')
+    expect(value.image).toBeUndefined()
+    expect(t.helper.calls.some(c => c.cmd === 'screenshot')).toBe(false)
+  })
+
+  it('still shows the screen when a batch that asked for text fails', async () => {
+    const t = setup()
+    t.access.grant('s1', ['Chrome'])
+    t.helper.failOn = 'keys'
+    const value = await t.run('computer_batch', { actions: [{ action: 'key', text: 'Return' }], finish: 'text' })
+    expect(value.text).toContain('Stopped')
+    expect(value.image).toBeDefined()
+  })
+
+  it('reads a window as text', async () => {
+    const t = setup()
+    t.helper.windowText = { text: '最后一段', length: 9000, truncated: true, source: 'text' }
+    const value = await t.run('ui_elements', { text: true, tail: 500 })
+    expect(value.text).toContain('last 4 of 9000 characters')
+    expect(value.text).toContain('最后一段')
+    expect(t.helper.calls.find(c => c.cmd === 'text')!.args.tail).toBe(500)
   })
 })

@@ -13,6 +13,9 @@
 | 截图即坐标系 | 模型只用最近一张截图的像素坐标，DPI、缩放、多显示器偏移全部由插件换算，高分屏（200% 缩放）也点得准 |
 | 动作后自动回传截图 | 点击 / 输入 / 按键 / 滚动后，**等画面不再变化**（页面加载、动画结束，最多约 2.5 秒）再截图；`wait` 也直接带回截图，“等一下再看”只需一步，而且画面一静止就提前结束，不会死等满时长；画面与上一张截图完全相同时不再发图，只告诉模型“没有可见变化”，省 token |
 | 批量动作 | `computer_batch` 一次执行“点输入框 → 输入 → 回车”等多步，最后只截一张图 |
+| 按名称点控件 | 动作里用 `target`（控件的可见名称，如 `"保存"`、`"按钮:确定"`）代替坐标。上一张截图里还没出现的控件也能点，比如上一步才打开的菜单项、才弹出的对话框按钮；最多等 3 秒它出现。重名时不猜，直接把候选和坐标告诉模型 |
+| 等条件而不是等时间 | `wait` 加 `until`（`"window:另存为"`、`"target:保存"`）：窗口或控件一出现（或一消失）就继续，超时才报错。配合 `target`，“按 Ctrl+S → 等另存为 → 填文件名 → 点保存”可以写进同一个批量调用 |
+| 把窗口读成文本 | `ui_elements` 加 `text: true` 直接读出文档、网页、聊天回复或日志的文字（默认取末尾 4000 字），比滚动加放大截图快，也能逐字引用；批量调用加 `finish: "text"` 可以用文字代替结尾的截图 |
 | 按应用授权 | 先 `request_access` 列出要操控的应用，经 DSH 原生审批后才能操作；也可改为“全部允许” |
 | 不会操作自己 | 永远拒绝向 DeepSeek Harness 自身窗口输入；常见密码管理器默认禁止，可再自定义禁用列表 |
 | 正在控制的提示 | 橙色光晕 + 胶囊提示条（显示当前动作），**不会出现在截图里** |
@@ -58,11 +61,11 @@ dsh plugin --profile web add @copylee/dsh-computer-use@latest
 | 工具 | 作用 |
 |---|---|
 | `computer` | 单个动作：`screenshot` `left_click` `double_click` `triple_click` `right_click` `middle_click` `mouse_move` `left_click_drag` `left_mouse_down/up` `scroll` `type` `key` `hold_key` `wait` `zoom` `cursor_position`（沿用通用 computer-use 动作命名，模型上手即会） |
-| `computer_batch` | 顺序执行多个动作，遇错即停，最后回传一张截图 |
+| `computer_batch` | 顺序执行多个动作，遇错即停，最后回传一张截图；最后一步可以是 `zoom`（回传放大区域），`finish` 可选 `screenshot` / `text` / `none` |
 | `app_skill` | 应用技能：`list` 列出、`read` 读取、`append` 追加、`write` 重写某个应用的操作笔记（单份上限 4000 字） |
 | `open_application` | 按名称（“Chrome”“记事本”“微信”）、exe 路径或网址打开应用；已运行则切到前台，在托盘里则从托盘图标恢复 |
 | `windows` | 列出窗口（含进程 exe 名）、聚焦 / 最小化 / 最大化 / 还原 / 关闭 |
-| `ui_elements` | 前台窗口的 UI Automation 元素列表，坐标已换算到截图坐标系 |
+| `ui_elements` | 前台窗口（含已打开的菜单）的 UI Automation 元素列表，坐标已换算到截图坐标系；`text: true` 改为读出窗口的文字内容 |
 | `clipboard` | 读 / 写剪贴板文本 |
 | `switch_display` | 多显示器时切换截图所在屏幕 |
 | `request_access` / `list_granted_applications` | 按应用授权 |

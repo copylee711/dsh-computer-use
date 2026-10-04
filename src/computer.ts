@@ -4,10 +4,11 @@
  * will receive the input, overlay status, and post-action screenshots.
  */
 import { setTimeout as sleep } from 'node:timers/promises'
-import { isHostWindow, isTransientShell, type AccessControl, type AccessMode, type WindowLike } from './access.js'
+import { appMatches, isHostWindow, isTransientShell, type AccessControl, type AccessMode, type WindowLike } from './access.js'
 import { contains, regionToPhysical, screenshotSize, toPhysical, toScreenshot, type Display, type Point, type Size } from './coords.js'
 import type { HelperLike } from './helper-client.js'
 import { parseKeys, parseModifiers } from './keys.js'
+import { matchTarget, type UiElement } from './target.js'
 import { splitBlocks, typingPieces } from './text.js'
 import type { CancellableAgent, HostWindowMode, OverlayController } from './overlay.js'
 
@@ -85,6 +86,12 @@ export interface ActionInput {
   scroll_amount?: number
   duration?: number
   region?: number[]
+  /** A control named by what it says, instead of a coordinate. */
+  target?: string
+  /** wait: what to wait for ("window:记事本", "target:保存"). */
+  until?: string
+  /** wait: wait for it to disappear instead. */
+  gone?: boolean
 }
 
 /** Actions that change something on screen and deserve a fresh screenshot. */
@@ -112,6 +119,11 @@ const UNCHANGED_DIFF = 0.0005
 
 /** Text returned instead of an identical screenshot. */
 export const UNCHANGED_TEXT = 'The screen looks exactly as in your previous screenshot: the action had no visible effect.'
+
+/** How long a named control may take to appear before the action gives up. */
+const TARGET_WAIT_MS = 3000
+/** Pause between looks while waiting for a control or a window. */
+const POLL_MS = 200
 
 /** Longest adaptive wait for the screen to settle after an action. */
 export const MAX_SETTLE_MS = 2500
@@ -334,8 +346,9 @@ export class Computer {
   }
 
   /** Programs running without any visible window (closed to the system tray); `tray` = has a tray icon. */
-  async backgroundApps(): Promise<Array<WindowInfo & { tray: boolean }>> {
-    const rows = await this.helper.call<Array<WindowInfo & { tray: boolean }>>('background', {}, 15_000).catch(() => [])
+  async backgroundApps(tray = true): Promise<Array<WindowInfo & { tray: boolean }>> {
+    // Whether each one has a tray icon costs a second or more to find out; callers that only match by name skip it.
+    const rows = await this.helper.call<Array<WindowInfo & { tray: boolean }>>('background', { tray }, 15_000).catch(() => [])
     return Array.isArray(rows) ? rows : []
   }
 
@@ -370,7 +383,7 @@ export class Computer {
 
   /** Overlay status line for an action (Chinese, shown to the user). */
   static statusOf(input: ActionInput): string {
-    const at = input.coordinate ? ` (${input.coordinate.join(', ')})` : ''
+    const at = input.target ? ` “${input.target.slice(0, 20)}”` : input.coordinate ? ` (${input.coordinate.join(', ')})` : ''
     switch (input.action) {
       case 'screenshot': return '查看屏幕'
       case 'zoom': return '放大查看'
@@ -387,8 +400,123 @@ export class Computer {
       case 'type': return `输入 “${(input.text ?? '').slice(0, 16)}${(input.text ?? '').length > 16 ? '…' : ''}”`
       case 'key': return `按键 ${input.text ?? ''}`
       case 'hold_key': return `按住 ${input.text ?? ''}`
-      case 'wait': return '等待'
+      case 'wait': return input.until ? `等待 ${input.until.slice(0, 24)}${input.gone ? ' 消失' : ''}` : '等待'
       case 'cursor_position': return '读取光标位置'
+    }
+  }
+
+  // -------------------------------------------------------------- targets
+
+  /**
+   * Controls of the foreground window, in physical pixels. `where` picks the
+   * window itself or its popups (open menus and flyouts are windows of their
+   * own). They are read separately because scanning both costs a second or
+   * more on a file dialog, and the control is nearly always in the window.
+   */
+  async elements(where: 'window' | 'popups' = 'window'): Promise<UiElement[]> {
+    const result = await this.helper.call<{ elements?: UiElement[] }>('ui', {
+      includeText: true, maxNodes: 400, ...(where === 'popups' ? { popupsOnly: true } : {}),
+    }, 20_000)
+    return Array.isArray(result.elements) ? result.elements : []
+  }
+
+  /** Look for a named control in the window, and only if it is not there in its popups. */
+  private async find(target: string): Promise<ReturnType<typeof matchTarget>> {
+    const inWindow = await this.elements('window').catch(() => [])
+    const match = matchTarget(inWindow, target)
+    if (match.kind !== 'missing') return match
+    const inPopups = await this.elements('popups').catch(() => [])
+    if (inPopups.length === 0) return match
+    const second = matchTarget(inPopups, target)
+    return second.kind === 'missing' ? matchTarget([...inWindow, ...inPopups], target) : second
+  }
+
+  /**
+   * Where a named control is. It may still be appearing (the menu just
+   * opened), so look again for a few seconds before giving up; an ambiguous
+   * name fails at once, with the candidates, rather than clicking a guess.
+   */
+  async locate(target: string, signal: AbortSignal, waitMs = TARGET_WAIT_MS): Promise<{ point: Point; element: UiElement }> {
+    const started = Date.now()
+    for (;;) {
+      if (signal.aborted) throw new Error('Cancelled.')
+      const match = await this.find(target)
+      if (match.kind === 'found') {
+        const el = match.element
+        return { point: { x: Math.round(el.x + el.width / 2), y: Math.round(el.y + el.height / 2) }, element: el }
+      }
+      if (match.kind === 'ambiguous') {
+        const list = await Promise.all(match.candidates.map(async el => {
+          const at = await this.toModel({ x: el.x + el.width / 2, y: el.y + el.height / 2 })
+          return `${el.role} "${el.name}" @ (${at.x}, ${at.y})`
+        }))
+        throw new Error(`target "${target}" matches ${match.candidates.length} controls: ${list.join('; ')}. Use one of these coordinates, or a more specific name.`)
+      }
+      if (Date.now() - started >= waitMs) {
+        const near = match.suggestions.length
+          ? ` Controls there now: ${match.suggestions.map(name => `"${name.slice(0, 40)}"`).join(', ')}.`
+          : ' The window exposes no named controls; use coordinates from a screenshot.'
+        throw new Error(`No control named "${target}" in the foreground window.${near}`)
+      }
+      await sleep(POLL_MS, undefined, { signal })
+    }
+  }
+
+  /** The point an action aims at: a named control, a coordinate, or nothing (the cursor). */
+  private async aim(input: ActionInput, call: CallContext): Promise<{ point: Point | undefined; label: string }> {
+    if (typeof input.target === 'string' && input.target.trim() !== '') {
+      const { point, element } = await this.locate(input.target, call.signal)
+      return { point, label: ` on ${element.role} "${element.name.slice(0, 60)}"` }
+    }
+    if (input.coordinate) return { point: await this.point(input.coordinate), label: ` at (${input.coordinate.join(', ')})` }
+    return { point: undefined, label: ' at the cursor' }
+  }
+
+  /** wait with `until`: done as soon as the window or control is there (or gone). */
+  private async waitUntil(input: ActionInput, signal: AbortSignal): Promise<string> {
+    const until = (input.until ?? '').trim()
+    const split = until.search(/[:：]/)
+    const prefix = split > 0 ? until.slice(0, split).trim().toLowerCase() : ''
+    const kind = prefix === 'window' ? 'window' : 'target'
+    const subject = (prefix === 'window' || prefix === 'target' ? until.slice(split + 1) : until).trim()
+    if (subject === '') throw new Error('wait until needs "window:<title or exe>" or "target:<control name>".')
+    const gone = input.gone === true
+    const timeout = Math.min(60, Math.max(0.2, Number(input.duration ?? 10) || 10)) * 1000
+    const needle = subject.toLowerCase()
+    let suggestions: string[] = []
+    let firstSeen: number | undefined
+    const present = async (): Promise<boolean> => {
+      if (kind === 'window') {
+        // By title or exe, or by the app's name the way open_application understands it ("记事本" is Notepad.exe).
+        const matches = (win: WindowInfo): boolean => win.title.toLowerCase().includes(needle) || win.exe.toLowerCase().includes(needle) || appMatches(subject, win)
+        // Dialogs are owned windows and missing from the window list, but they take the foreground.
+        const fg = await this.foreground().catch(() => undefined)
+        if (fg && matches(fg)) return true
+        const rows = await this.windows().catch(() => [])
+        const found = (Array.isArray(rows) ? rows : []).filter(win => !win.minimized && matches(win))
+        if (gone || found.length === 0) return found.length > 0
+        // A window that exists but does not have the keyboard yet would lose the next keys:
+        // give it a moment to come to the front before calling it there.
+        if (found.some(win => win.foreground === true)) return true
+        if (fg && found.some(win => win.hwnd === fg.hwnd || win.pid === fg.pid)) return true
+        firstSeen ??= Date.now()
+        return Date.now() - firstSeen > 1500
+      }
+      const match = await this.find(subject)
+      if (match.kind === 'missing') suggestions = match.suggestions
+      return match.kind !== 'missing'
+    }
+    const started = Date.now()
+    for (;;) {
+      if (signal.aborted) throw new Error('Cancelled.')
+      if (await present() !== gone) {
+        return `${kind === 'window' ? 'Window' : 'Control'} "${subject}" ${gone ? 'is gone' : 'is there'} after ${((Date.now() - started) / 1000).toFixed(1)}s.`
+      }
+      if (Date.now() - started >= timeout) {
+        const near = !gone && kind === 'target' && suggestions.length ? ` Controls there now: ${suggestions.map(name => `"${name.slice(0, 40)}"`).join(', ')}.` : ''
+        throw new Error(`Timed out after ${Math.round(timeout / 1000)}s waiting for ${kind === 'window' ? 'window' : 'control'} "${subject}" to ${gone ? 'disappear' : 'appear'}.${near}`)
+      }
+      await sleep(POLL_MS, undefined, { signal })
     }
   }
 
@@ -442,24 +570,26 @@ export class Computer {
       case 'wait': {
         // Up to `duration`, but done as soon as the screen has been still for a
         // moment: models ask for "wait 3s" after pages that already loaded.
+        if (input.until) return { text: await this.waitUntil(input, call.signal) }
         const seconds = Math.min(30, Math.max(0, Number(input.duration ?? 1) || 0))
         const waited = await this.waitForQuiet(seconds * 1000, call.signal)
         return { text: waited < seconds * 1000 - 200 ? `Waited ${(waited / 1000).toFixed(1)}s (the screen settled early).` : `Waited ${seconds}s.` }
       }
       case 'mouse_move': {
-        const p = await this.point(input.coordinate)
+        const { point: p, label } = await this.aim(input, call)
+        if (!p) throw new Error('mouse_move needs coordinate or target.')
         await this.helper.call('move', { ...p })
-        return { text: `Moved the mouse to (${input.coordinate!.join(', ')}).` }
+        return { text: `Moved the mouse${label.replace(/^ (at|on)/, ' to')}.` }
       }
       case 'left_click': case 'right_click': case 'middle_click': case 'double_click': case 'triple_click': {
-        const p = input.coordinate ? await this.point(input.coordinate) : undefined
+        const { point: p, label } = await this.aim(input, call)
         await this.checkPointer(call, p, 'click')
         const button = action === 'right_click' ? 'right' : action === 'middle_click' ? 'middle' : 'left'
         const count = action === 'double_click' ? 2 : action === 'triple_click' ? 3 : 1
         // Anthropic's schema passes click modifiers in `text`.
         const modifiers = parseModifiers(input.modifiers ?? input.text)
         await this.helper.call('click', { ...(p ?? {}), button, count, modifiers })
-        return { text: `${action.replace('_', ' ')}${input.coordinate ? ` at (${input.coordinate.join(', ')})` : ' at the cursor'}${modifiers.length ? ` holding ${input.modifiers ?? input.text}` : ''}.` }
+        return { text: `${action.replace('_', ' ')}${label}${modifiers.length ? ` holding ${input.modifiers ?? input.text}` : ''}.` }
       }
       case 'left_click_drag': {
         const from = await this.point(input.start_coordinate, 'start_coordinate')
@@ -476,7 +606,7 @@ export class Computer {
         return { text: `Left button ${action === 'left_mouse_down' ? 'down' : 'up'}.` }
       }
       case 'scroll': {
-        const p = input.coordinate ? await this.point(input.coordinate) : undefined
+        const { point: p } = await this.aim(input, call)
         await this.checkPointer(call, p, 'scroll')
         const amount = Math.max(1, Math.min(30, Math.round(input.scroll_amount ?? 3)))
         const direction = input.scroll_direction ?? 'down'
@@ -488,8 +618,17 @@ export class Computer {
       case 'type': {
         const text = input.text ?? ''
         if (text === '') throw new Error('type needs text.')
+        let into = ''
+        if (input.target || input.coordinate) {
+          // Click the field first: that is what gives it the keyboard.
+          const { point: p, label } = await this.aim(input, call)
+          await this.checkPointer(call, p, 'click')
+          await this.helper.call('click', { ...(p ?? {}), button: 'left', count: 1, modifiers: [] })
+          await sleep(120, undefined, { signal: call.signal })
+          into = ` (clicked${label} first)`
+        }
         await this.checkKeyboard(call, 'type into')
-        return { text: await this.enterText(text, call) }
+        return { text: `${await this.enterText(text, call)}${into}` }
       }
       case 'key': {
         const combos = parseKeys(input.text ?? '')

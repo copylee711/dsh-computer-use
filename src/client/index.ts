@@ -181,14 +181,18 @@ function ComputerUseSection({ ctx }: { ctx: ClientContext }) {
   const [view, setView] = React.useState<NamespaceView | undefined>(undefined)
   const [draft, setDraft] = React.useState<Draft>(() => draftFrom(undefined))
   const [dirty, setDirty] = React.useState(false)
+  const dirtyRef = React.useRef(false)
+  dirtyRef.current = dirty
+  const draftRef = React.useRef(draft)
+  draftRef.current = draft
   const [saving, setSaving] = React.useState(false)
+  /** The draft whose save failed: not retried until it is edited again. */
+  const [failed, setFailed] = React.useState<Draft | null>(null)
   const [message, setMessage] = React.useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
   const [status, setStatus] = React.useState<Status | null>(null)
   const [cache, setCache] = React.useState<CacheStats | null>(null)
   const [cacheBusy, setCacheBusy] = React.useState(false)
   const [cacheNote, setCacheNote] = React.useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
-  const dirtyRef = React.useRef(false)
-  dirtyRef.current = dirty
 
   const load = React.useCallback(async (reset: boolean) => {
     try {
@@ -197,7 +201,12 @@ function ComputerUseSection({ ctx }: { ctx: ClientContext }) {
       const found = result.value.namespaces.find(item => item.ns === ENTRY_ID)
       setWritable(result.value.writable)
       setView(found)
-      if (reset || !dirtyRef.current) { setDraft(draftFrom(found?.value)); setDirty(false) }
+      if (reset || !dirtyRef.current) {
+        // Keep the text as typed when it already means the stored values (a trailing newline in a list, say).
+        const stored = draftFrom(found?.value)
+        if (reset || JSON.stringify(valuesFrom(stored)) !== JSON.stringify(valuesFrom(draftRef.current))) setDraft(stored)
+        setDirty(false)
+      }
     } catch (error) {
       setMessage({ kind: 'error', text: `读取设置失败：${(error as Error).message}` })
     } finally {
@@ -257,25 +266,35 @@ function ComputerUseSection({ ctx }: { ctx: ClientContext }) {
 
   const errors = validate(draft)
   const invalid = Object.keys(errors).length > 0
-  const disabled = !writable || view === undefined || saving
+  const disabled = !writable || view === undefined
 
   const save = async () => {
     if (view === undefined || invalid) return
     setSaving(true)
+    const saved = draft
     try {
-      const values = valuesFrom(draft)
+      const values = valuesFrom(saved)
       const result = await ctx.remote.settings.mutate(ENTRY_ID, Object.entries(values).map(([key, value]) => ({ op: 'set' as const, path: [key], value })), view.revision)
       if (!result.ok) throw new Error(result.error.message)
-      setMessage({ kind: 'ok', text: '已保存，下一步操作即生效' })
-      setDirty(false)
-      await load(true)
+      setMessage({ kind: 'ok', text: '已自动保存，下一步操作即生效' })
+      // Edits made while the request was in flight stay dirty and go out in the next save.
+      if (draftRef.current === saved) { dirtyRef.current = false; setDirty(false) }
+      await load(false)
       void refreshStatus()
     } catch (error) {
+      setFailed(saved)
       setMessage({ kind: 'error', text: `保存失败：${(error as Error).message}` })
     } finally {
       setSaving(false)
     }
   }
+
+  // Every change saves itself: a switch that silently needs a Save button at the bottom of a long page gets lost.
+  React.useEffect(() => {
+    if (!dirty || invalid || disabled || saving || failed === draft) return
+    const timer = setTimeout(() => { void save() }, 500)
+    return () => clearTimeout(timer)
+  }, [draft, dirty, invalid, disabled, saving, failed])
 
   const preview = async () => {
     try {
@@ -445,19 +464,14 @@ function ComputerUseSection({ ctx }: { ctx: ClientContext }) {
 
     h('div', { style: S.actions },
       h('button', {
-        type: 'button', style: { ...S.primary, opacity: disabled || !dirty || invalid ? 0.5 : 1 },
-        disabled: disabled || !dirty || invalid, onClick: () => { void save() },
-      }, saving ? '保存中…' : '保存'),
-      h('button', {
-        type: 'button', style: S.secondary, disabled: !dirty || saving,
-        onClick: () => { setDraft(draftFrom(view?.value)); setDirty(false); setMessage(null) },
-      }, '放弃修改'),
-      h('button', {
         type: 'button', style: S.secondary, disabled: disabled,
         onClick: () => { setDraft(draftFrom({})); setDirty(true); setMessage(null) },
       }, '恢复默认'),
-      dirty ? h('span', { style: S.hint }, '有未保存的修改') : null,
-      message === null ? null : h('span', { style: message.kind === 'ok' ? S.ok : S.error }, message.text),
+      saving ? h('span', { style: S.hint }, '保存中…')
+        : dirty && invalid ? h('span', { style: S.error }, '有数值超出范围，改好后自动保存')
+        : failed === draft && dirty ? h('button', { type: 'button', style: S.secondary, onClick: () => { setFailed(null) } }, '重试保存')
+        : null,
+      message === null || (dirty && invalid) ? null : h('span', { style: message.kind === 'ok' ? S.ok : S.error }, message.text),
     ),
 
     h(AccentPicker, null),

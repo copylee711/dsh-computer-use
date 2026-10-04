@@ -19,7 +19,7 @@ import { OverlayController, type CancellableAgent, type HostWindowMode, type Str
 import { promptText } from './prompt.js'
 import { SkillStore } from './skills.js'
 import { resolveConfig } from './settings.js'
-import { isOperating, lowestEffort } from './effort.js'
+import { isOperating, lowestEffort, retryMalformed } from './effort.js'
 import { PREVIEW_ROUTE, SCREENSHOTS_CLEAN_ROUTE, SCREENSHOTS_ROUTE, STATUS_ROUTE, SKILLS_ROUTE, skillsRoute, previewRoute, screenshotsCleanRoute, screenshotsRoute, statusRoute } from './routes.js'
 import { ScreenshotCache } from './screenshots.js'
 import { createTools } from './tools.js'
@@ -88,8 +88,8 @@ export const Config: z<Config> = z.object({
     'en-US': { $description: 'How text is entered' },
   }),
   quickSteps: z.boolean().default(false).volatile().i18n({
-    'zh-CN': { $description: '操作电脑的那几轮请求用模型的最低思考强度（每步更快）；其余请求沿用会话的思考强度' },
-    'en-US': { $description: 'Use the model\'s lowest reasoning effort for the requests in the middle of operating the computer (faster steps); other requests keep the session\'s effort' },
+    'zh-CN': { $description: '（Beta）操作电脑的那一轮用模型的最低思考强度（每步更快）；其余沿用会话的思考强度' },
+    'en-US': { $description: '(Beta) Use the model\'s lowest reasoning effort for the requests in the middle of operating the computer (faster steps); other requests keep the session\'s effort' },
   }),
   autoScreenshot: z.boolean().default(true).volatile().i18n({
     'zh-CN': { $description: '每次操作后自动回传截图（省去一轮调用）' },
@@ -262,7 +262,8 @@ export function apply(ctx: Context, config: Config = {}): void {
         if (effort === undefined || options.reasoningEffort === effort) { yield* next(); return }
         const copy = Object.freeze({ ...options, reasoningEffort: effort })
         lowered.add(copy)
-        yield* (llmCtx.llm as unknown as { stream(options: StreamOptions): AsyncIterable<unknown> }).stream(copy)
+        const llm = llmCtx.llm as unknown as { stream(options: StreamOptions): AsyncIterable<unknown> }
+        yield* retryMalformed(() => llm.stream(copy))
       })()
     }) as never, { global: true } as never), 'computer-use: quick steps')
   })

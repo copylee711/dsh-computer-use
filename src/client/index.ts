@@ -414,8 +414,8 @@ function ComputerUseSection({ ctx }: { ctx: ClientContext }) {
     h('section', { style: S.card },
       h('h3', { style: S.cardTitle }, '速度'),
       h(ToggleRow, {
-        title: '操作时不深度思考',
-        hint: '正在操作电脑的那几轮（看截图、决定下一步点哪里）改用模型的最低思考强度，每一步明显更快、动作更连贯；任务开头的规划和其他对话仍按会话里选的思考强度。模型不支持调整思考强度时不起作用。',
+        title: '操作时不深度思考（Beta）',
+        hint: '试验功能，一般不用开。开始操作电脑后，本轮改用模型的最低思考强度，每一步快约 1 秒；任务开头的规划和之后的对话仍按会话里选的思考强度。代价：不思考时模型更容易出错、多走几步，本轮的回复文字会整段出现而不是逐字流出。目前只在 DeepSeek 官方模型上有效。',
         checked: draft.quickSteps, disabled, onChange: value => edit('quickSteps', value),
       }),
     ),

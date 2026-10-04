@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isOperating, lowestEffort } from '../src/effort.js'
+import { isOperating, lowestEffort, retryMalformed } from '../src/effort.js'
 
 const OWN = new Set(['computer', 'computer_batch', 'open_application'])
 const user = { role: 'user', content: [{ type: 'text', text: '打开记事本' }] }
@@ -35,5 +35,26 @@ describe('quick steps', () => {
     expect(lowestEffort([{ id: 'High' }, { id: 'Low' }, { id: 'Medium' }])).toBe('Low')
     expect(lowestEffort([{ id: 'max' }, { id: 'high' }])).toBeUndefined()
     expect(lowestEffort(undefined)).toBeUndefined()
+  })
+
+  it('asks again for a reply whose tool arguments were malformed, and passes on only the good one', async () => {
+    const malformed = Object.assign(new Error('tool input is invalid JSON'), { code: 'MALFORMED_RESPONSE' })
+    let runs = 0
+    const run = async function* () { runs++; yield `start ${runs}`; if (runs < 3) throw malformed; yield 'done' }
+    const seen: string[] = []
+    for await (const event of retryMalformed(run)) seen.push(event)
+    expect(seen).toEqual(['start 3', 'done'])
+  })
+
+  it('gives up after the attempts and never retries other errors', async () => {
+    const malformed = Object.assign(new Error('bad'), { code: 'MALFORMED_RESPONSE' })
+    let runs = 0
+    const always = async function* (): AsyncGenerator<string> { runs++; throw malformed }
+    await expect((async () => { for await (const _ of retryMalformed(always)) { /* drain */ } })()).rejects.toBe(malformed)
+    expect(runs).toBe(3)
+    let aborts = 0
+    const aborted = async function* (): AsyncGenerator<string> { aborts++; throw Object.assign(new Error('aborted'), { code: 'ABORTED' }) }
+    await expect((async () => { for await (const _ of retryMalformed(aborted)) { /* drain */ } })()).rejects.toThrow('aborted')
+    expect(aborts).toBe(1)
   })
 })

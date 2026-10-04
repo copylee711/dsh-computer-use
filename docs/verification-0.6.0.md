@@ -148,3 +148,18 @@ opencode go 的 DeepSeek V4.1 Flash 只提供 Low / High / Max（界面上的 De
 
 - 开启 quickSteps 的 3 次里有 2 次，本轮因 `DeepSeek Messages stream: tool input is invalid JSON`（MALFORMED_RESPONSE）结束，都发生在不思考的步骤上；关闭 quickSteps 的 3 次对照没有出现。样本很小，但指向“不思考时模型更容易写坏工具参数”。0.7.0 的 4 次开启测试里没有出现过。
 - 每步模型耗时：开启 1.0–2.0 秒，关闭 0.8–3.5 秒（个别 5.5 秒）。
+
+## 0.7.3：quickSteps 标为 Beta，坏参数自动重发
+
+- 设置页、配置说明和 README 里把“操作时不深度思考”标为 Beta，写明一般不用开及其代价。
+- 降低思考强度的请求如果以 `MALFORMED_RESPONSE`（工具参数不是合法 JSON）失败，丢弃这次回复重新请求，最多共 3 次。为了能丢弃，这类请求的回复要等完整后才交给宿主，所以开启后操作那一轮的回复文字整段出现。
+
+验证：
+
+- `pnpm typecheck`、`pnpm test`（11 个文件 110 项）通过；`tests/effort.spec.ts` 覆盖“坏了重发、只交出好的那次”“超过次数放弃”“其他错误不重试”。
+- 隔离的 `dsh web` 0.2.0-rc.2，DeepSeek 官方接口，同一任务开启 quickSteps 跑 4 次：没有一次以 MALFORMED_RESPONSE 或 INVALID_REQUEST 结束（0.7.2 是 3 次里 2 次）。
+
+没有验证的：
+
+- 这 4 次里重发是否真的被触发过没有记录，所以“重发救回了失败”只有单元测试支持，实测只能说明没有再失败。
+- 4 次里有 3 次停在隔离环境的命令行工具反复调用上，没有走到本轮结束；关闭 quickSteps 的对照里也有同样现象，与本改动无关，但意味着完整跑完的只有 1 次。

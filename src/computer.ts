@@ -67,6 +67,8 @@ export interface CallContext {
   signal: AbortSignal
   /** Whether the conversation model can look at images. */
   vision: boolean
+  /** The session never prompts for approval (full access / auto review): access requests are granted as they come. */
+  autoApprove?: boolean
 }
 
 export const ACTIONS = [
@@ -510,7 +512,10 @@ export class Computer {
     for (;;) {
       if (signal.aborted) throw new Error('Cancelled.')
       if (await present() !== gone) {
-        return `${kind === 'window' ? 'Window' : 'Control'} "${subject}" ${gone ? 'is gone' : 'is there'} after ${((Date.now() - started) / 1000).toFixed(1)}s.`
+        const text = `${kind === 'window' ? 'Window' : 'Control'} "${subject}" ${gone ? 'is gone' : 'is there'} after ${((Date.now() - started) / 1000).toFixed(1)}s.`
+        // A window that just appeared is still drawing: the screenshot that follows should show it finished.
+        await this.settle(signal)
+        return text
       }
       if (Date.now() - started >= timeout) {
         const near = !gone && kind === 'target' && suggestions.length ? ` Controls there now: ${suggestions.map(name => `"${name.slice(0, 40)}"`).join(', ')}.` : ''

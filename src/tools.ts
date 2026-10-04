@@ -235,7 +235,12 @@ export function createTools(host: ToolHost): ToolDefinition[] {
         const running = (await computer.windows()).find(win => appMatches(appName, win))
           ?? (await computer.backgroundApps(false)).find(win => appMatches(appName, win))
         if (!running || !computer.access.isGranted(call.session, running)) {
-          throw new Error(`"${appName}" is not granted for this session. Call request_access with ["${appName}"] first.`)
+          // A session that never prompts would have this request approved without asking:
+          // grant it here instead of costing the model a failed call and a request_access round.
+          if (call.autoApprove !== true || normalizeApp(appName).includes('deepseek harness')) {
+            throw new Error(`"${appName}" is not granted for this session. Call request_access with ["${appName}"] first.`)
+          }
+          computer.access.grant(call.session, [appName])
         }
       }
       await computer.overlay.begin(call.agent, `打开 ${name}`)

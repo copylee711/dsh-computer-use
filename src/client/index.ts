@@ -310,7 +310,7 @@ function ComputerUseSection({ ctx }: { ctx: ClientContext }) {
       h('div', { style: S.actions },
         h('button', { type: 'button', style: S.secondary, onClick: () => { void preview() } }, '预览效果'),
         h('button', { type: 'button', style: S.secondary, onClick: () => { void refreshStatus() } }, '刷新状态'),
-        h('span', { style: S.hint }, '预览会显示 3 秒光晕和提示条（按已保存的设置）。'),
+        h('span', { style: S.hint }, '预览 4 秒：按已保存的设置显示光晕，以及迷你进度卡片或提示条。'),
       ),
     ),
 

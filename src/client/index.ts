@@ -57,6 +57,7 @@ interface Draft {
   hostWindow: Settings['hostWindow']
   cardOpacity: number
   typingMode: Settings['typingMode']
+  quickSteps: boolean
   pauseOnUserInput: boolean
   userIdleMs: string
   autoScreenshot: boolean
@@ -78,6 +79,7 @@ function draftFrom(value: unknown): Draft {
     hostWindow: s.hostWindow,
     cardOpacity: s.cardOpacity,
     typingMode: s.typingMode,
+    quickSteps: s.quickSteps,
     pauseOnUserInput: s.pauseOnUserInput,
     userIdleMs: String(s.userIdleMs),
     autoScreenshot: s.autoScreenshot,
@@ -112,6 +114,7 @@ function valuesFrom(d: Draft): Record<string, unknown> {
     hostWindow: d.hostWindow,
     cardOpacity: d.cardOpacity,
     typingMode: d.typingMode,
+    quickSteps: d.quickSteps,
     pauseOnUserInput: d.pauseOnUserInput,
     userIdleMs: Math.round(Number(d.userIdleMs)),
     autoScreenshot: d.autoScreenshot,
@@ -386,6 +389,16 @@ function ComputerUseSection({ ctx }: { ctx: ClientContext }) {
           h('span', { style: { ...S.hint, fontWeight: 400 } }, '短文字都会逐字打出来。长文本逐字输入在 Typora、Obsidian、Word 等编辑器里可能被自动补全括号、自动续列表打乱；流式按段落粘贴，既看得到过程又不会乱。'),
         ),
       ),
+    ),
+
+    // Speed
+    h('section', { style: S.card },
+      h('h3', { style: S.cardTitle }, '速度'),
+      h(ToggleRow, {
+        title: '操作时不深度思考',
+        hint: '正在操作电脑的那几轮（看截图、决定下一步点哪里）改用模型的最低思考强度，每一步明显更快、动作更连贯；任务开头的规划和其他对话仍按会话里选的思考强度。模型不支持调整思考强度时不起作用。',
+        checked: draft.quickSteps, disabled, onChange: value => edit('quickSteps', value),
+      }),
     ),
 
     // Yield to the user

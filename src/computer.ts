@@ -31,6 +31,8 @@ export interface Settings {
   userIdleMs: number
   /** How text is entered: stream = paste block by block, type = key by key, paste = at once. */
   typingMode: TypingMode
+  /** Run the model at its lowest reasoning effort for the requests in the middle of operating the computer. */
+  quickSteps: boolean
 }
 
 export type TypingMode = 'stream' | 'type' | 'paste'

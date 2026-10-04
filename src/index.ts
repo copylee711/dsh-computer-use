@@ -19,6 +19,7 @@ import { OverlayController, type CancellableAgent, type HostWindowMode, type Str
 import { promptText } from './prompt.js'
 import { SkillStore } from './skills.js'
 import { resolveConfig } from './settings.js'
+import { isOperating, lowestEffort } from './effort.js'
 import { PREVIEW_ROUTE, SCREENSHOTS_CLEAN_ROUTE, SCREENSHOTS_ROUTE, STATUS_ROUTE, SKILLS_ROUTE, skillsRoute, previewRoute, screenshotsCleanRoute, screenshotsRoute, statusRoute } from './routes.js'
 import { ScreenshotCache } from './screenshots.js'
 import { createTools } from './tools.js'
@@ -45,6 +46,7 @@ export interface Config {
   pauseOnUserInput?: boolean
   userIdleMs?: number
   typingMode?: TypingMode
+  quickSteps?: boolean
 }
 
 
@@ -84,6 +86,10 @@ export const Config: z<Config> = z.object({
   ]).default('stream').volatile().i18n({
     'zh-CN': { $description: '文字输入方式' },
     'en-US': { $description: 'How text is entered' },
+  }),
+  quickSteps: z.boolean().default(false).volatile().i18n({
+    'zh-CN': { $description: '操作电脑的那几轮请求用模型的最低思考强度（每步更快）；其余请求沿用会话的思考强度' },
+    'en-US': { $description: 'Use the model\'s lowest reasoning effort for the requests in the middle of operating the computer (faster steps); other requests keep the session\'s effort' },
   }),
   autoScreenshot: z.boolean().default(true).volatile().i18n({
     'zh-CN': { $description: '每次操作后自动回传截图（省去一轮调用）' },
@@ -226,6 +232,39 @@ export function apply(ctx: Context, config: Config = {}): void {
         'zh-CN': `允许 DeepSeek 在本次会话中操控：${missing.join('、')}？${reason ? `（${reason}）` : ''}`,
       },
     }
+  })
+
+  // Quick steps: a request that continues computer use runs at the model's lowest reasoning effort.
+  ctx.inject(['llm'], (llmCtx: Context) => {
+    const lowest = new Map<string, Promise<string | undefined>>()
+    const lowestFor = (provider: string, model: string): Promise<string | undefined> => {
+      const key = `${provider}\u0000${model}`
+      let cached = lowest.get(key)
+      if (!cached) {
+        const llm = llmCtx.llm as unknown as { resolveModelInfo?(provider: string, model: string): Promise<{ reasoning?: { efforts?: readonly { id: string }[] } }> }
+        cached = typeof llm.resolveModelInfo === 'function'
+          ? llm.resolveModelInfo(provider, model).then(info => lowestEffort(info.reasoning?.efforts)).catch(() => { lowest.delete(key); return undefined })
+          : Promise.resolve(undefined)
+        lowest.set(key, cached)
+      }
+      return cached
+    }
+    type StreamOptions = { provider?: string; model?: string; reasoningEffort?: string; messages?: readonly unknown[] }
+    const lowered = new WeakSet<object>()
+    llmCtx.effect(() => llmCtx.on('llm/stream' as never, ((options: StreamOptions, next: () => AsyncIterable<unknown>) => {
+      if (!settings().quickSteps || !options.provider || !options.model || !Array.isArray(options.messages) || !isOperating(options.messages, OWN_TOOLS)) return next()
+      if (lowered.has(options)) return next()
+      const { provider, model } = options
+      // The request is frozen, so the lower effort goes out as a copy of it, sent through the
+      // same llm service (the copy is remembered so that this listener lets it pass).
+      return (async function* () {
+        const effort = await lowestFor(provider, model)
+        if (effort === undefined || options.reasoningEffort === effort) { yield* next(); return }
+        const copy = Object.freeze({ ...options, reasoningEffort: effort })
+        lowered.add(copy)
+        yield* (llmCtx.llm as unknown as { stream(options: StreamOptions): AsyncIterable<unknown> }).stream(copy)
+      })()
+    }) as never, { global: true } as never), 'computer-use: quick steps')
   })
 
   // The progress card shows the reply and the thinking / tool calls as they stream.

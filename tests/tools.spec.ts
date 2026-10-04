@@ -47,7 +47,7 @@ class FakeHelper implements HelperLike {
   dispose(): void {}
 }
 
-function setup(options: { vision?: boolean; mode?: Settings['accessMode']; typing?: Settings['typingMode']; skills?: SkillStore } = {}) {
+function setup(options: { vision?: boolean; mode?: Settings['accessMode']; typing?: Settings['typingMode']; skills?: SkillStore; autoApprove?: boolean } = {}) {
   const helper = new FakeHelper()
   const access = new AccessControl()
   const settings = { ...SETTINGS, accessMode: options.mode ?? 'per-app', typingMode: options.typing ?? SETTINGS.typingMode }
@@ -63,7 +63,7 @@ function setup(options: { vision?: boolean; mode?: Settings['accessMode']; typin
       saved.push(shot.width)
       return { attachmentId: `att-${saved.length}`, mediaType: 'image/jpeg', bytes: 4, width: shot.width, height: shot.height } as never
     },
-    context: async () => ({ session: 's1', agent, signal: new AbortController().signal, vision: options.vision ?? true }),
+    context: async () => ({ session: 's1', agent, signal: new AbortController().signal, vision: options.vision ?? true, autoApprove: options.autoApprove ?? false }),
   })
   const tool = (name: string) => tools.find(t => t.name === name)!
   const run = (name: string, args: unknown) => tool(name).execute(args, {} as never) as Promise<{ text: string; image?: { attachmentId: string } }>
@@ -562,5 +562,21 @@ describe('one call for a whole sequence', () => {
     expect(value.text).toContain('last 4 of 9000 characters')
     expect(value.text).toContain('最后一段')
     expect(t.helper.calls.find(c => c.cmd === 'text')!.args.tail).toBe(500)
+  })
+})
+
+describe('sessions that never prompt for approval', () => {
+  it('grants the app on open_application instead of sending the model back to request_access', async () => {
+    const asking = setup()
+    await expect(asking.run('open_application', { name: 'Chrome' })).rejects.toThrow(/not granted/)
+    const t = setup({ autoApprove: true })
+    const outcome = await t.run('open_application', { name: 'Chrome' }).catch((error: Error) => error)
+    expect(outcome instanceof Error ? outcome.message : '').not.toMatch(/not granted/)
+    expect(t.access.missing('s1', ['Chrome'])).toEqual([])
+  })
+
+  it('still never grants DeepSeek Harness itself', async () => {
+    const t = setup({ autoApprove: true })
+    await expect(t.run('open_application', { name: 'DeepSeek Harness' })).rejects.toThrow(/not granted/)
   })
 })

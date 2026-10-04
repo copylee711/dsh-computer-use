@@ -165,6 +165,12 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   const attachments = (): AttachmentStore => ctx.attachments as AttachmentStore
 
+  /** "never" comes from the full-access / auto presets: the user opted out of approval prompts. */
+  const approvalPolicy = (agent: { session: unknown }): string | undefined => {
+    const approval = (ctx as unknown as { get(name: string): unknown }).get('approval') as { effectivePolicy?(session: unknown): string } | undefined
+    try { return approval?.effectivePolicy?.(agent.session) } catch { return undefined }
+  }
+
   // Orphaned screenshots (their session was deleted) are removed shortly after
   // start-up and twice a day; referenced ones are never touched.
   const screenshots = new ScreenshotCache(undefined, undefined, log)
@@ -191,6 +197,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         agent: exec.agent,
         signal: exec.signal,
         vision: await supportsVision(exec.agent, exec.signal),
+        autoApprove: exec.agent !== undefined && approvalPolicy(exec.agent) === 'never',
       }
     },
   })

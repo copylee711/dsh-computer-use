@@ -5,10 +5,14 @@
  *
  * Blocks end after a blank-line separator, never inside a ``` / ~~~ fence and
  * never inside a paragraph (a half-pasted **bold** or link may not re-render).
- * Joining the blocks gives back the original text exactly.
+ * Text with no blank line at all (a story written one paragraph per line) is
+ * split at its line ends instead, or it would go in as a single block; a table
+ * keeps its rows together. Joining the blocks gives back the original text exactly.
  */
 export function splitBlocks(text: string, minChars = 80): string[] {
   const lines = text.split(/(?<=\n)/) // keep each line's newline
+  // One paragraph per line: every line end is a paragraph end.
+  const byLine = !/\n[ \t]*\r?\n/.test(text) && !/^\s*(```|~~~|\|)/m.test(text)
   const blocks: string[] = []
   let current = ''
   let fence: string | undefined
@@ -22,7 +26,7 @@ export function splitBlocks(text: string, minChars = 80): string[] {
     }
     const blank = bare.trim() === ''
     // A non-blank line after blank ones starts a new block (outside fences).
-    if (fence === undefined && !blank && previousBlank && current.length >= minChars) {
+    if (fence === undefined && !blank && (previousBlank || (byLine && current !== '')) && current.length >= minChars) {
       blocks.push(current)
       current = ''
     }

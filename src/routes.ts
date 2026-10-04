@@ -56,10 +56,21 @@ export function previewRoute(helper: HelperLike, settings: () => Settings, overl
     if (req.method !== 'POST') { json(res, 405, { ok: false, error: 'POST only' }); return }
     if (overlay.controller !== undefined) { json(res, 409, { ok: false, error: 'busy' }); return }
     const s = settings()
+    // The same call the real thing makes, so the preview is what the saved settings show:
+    // with the mini progress card, the card (and a sample of what scrolls through it) instead of the label bar.
+    const pet = s.hostWindow === 'pet'
     await helper.call('overlay_show', {
-      label: `${s.overlayLabel} 正在操控你的电脑`, status: '预览 · 3 秒后消失', icon: iconPath, idleMs: s.userIdleMs, glow: s.overlay,
+      label: pet ? `${s.overlayLabel} 正在操控` : `${s.overlayLabel} 正在操控你的电脑`,
+      status: pet ? '预览' : '预览 · 4 秒后消失',
+      icon: iconPath, iconLight: iconPath.replace(/deepseek-white\.png$/, 'deepseek-black.png'),
+      idleMs: s.userIdleMs, glow: s.overlay, pet, petOpacity: s.cardOpacity, text: '',
     })
-    setTimeout(() => { if (overlay.controller === undefined) void helper.call('overlay_hide').catch(() => {}) }, 3000).unref()
+    if (pet) {
+      await helper.call('pet_update', {
+        text: '这是预览：操控电脑时，这里滚动显示 AI 的回复正文。', thinking: '第二行显示思考过程和最近几步操作', steps: ['打开应用', '输入文字', '预览 · 4 秒后消失'], thinkingLatest: false,
+      }).catch(() => {})
+    }
+    setTimeout(() => { if (overlay.controller === undefined) void helper.call('overlay_hide').catch(() => {}) }, 4000).unref()
     json(res, 200, { ok: true })
   }
 }

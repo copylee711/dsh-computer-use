@@ -3,8 +3,8 @@
  * is "look at the screenshot, pick the next click". Deliberating over that
  * costs seconds per step and is what makes the motion feel halting, so those
  * requests can run at the model's lowest reasoning effort. Requests that are
- * not in the middle of operating (planning from the user's message, working
- * with other tools) keep the session's own setting.
+ * not part of operating (planning from the user's message, turns that never
+ * touch the computer) keep the session's own setting.
  */
 
 interface MessageLike {
@@ -14,19 +14,30 @@ interface MessageLike {
 }
 
 /**
- * Is this request the continuation of computer use: was the last thing in the
- * conversation the result of one of this plugin's tools?
+ * Has this turn started operating the computer: is there a result of one of
+ * this plugin's tools since the user's last message?
+ *
+ * It has to hold for the rest of the turn, not only right after such a result:
+ * the replies written at the lowered effort carry no reasoning, and a provider
+ * in thinking mode refuses a turn whose earlier tool-calling replies lack it
+ * (DeepSeek: "content[].thinking ... must be passed back"). So once a turn has
+ * a reply written without thinking, every later request of that turn goes
+ * without it too.
  */
 export function isOperating(messages: readonly unknown[], ownTools: ReadonlySet<string>): boolean {
-  const last = messages[messages.length - 1] as MessageLike | undefined
-  if (last?.role !== 'tool' || typeof last.toolCallId !== 'string') return false
-  for (let index = messages.length - 2; index >= 0; index--) {
-    const message = messages[index] as MessageLike
-    if (message.role !== 'assistant' || !Array.isArray(message.content)) continue
-    const call = (message.content as Array<{ type?: string; id?: string; name?: string }>).find(part => part.type === 'tool-call' && part.id === last.toolCallId)
-    if (call) return typeof call.name === 'string' && ownTools.has(call.name)
-    // The matching call is always in the nearest assistant message; an older one would be another turn's.
-    return false
+  let start = messages.length
+  while (start > 0 && (messages[start - 1] as MessageLike | undefined)?.role !== 'user') start--
+  const names = new Map<string, string>()
+  for (let index = start; index < messages.length; index++) {
+    const message = messages[index] as MessageLike | undefined
+    if (message?.role === 'assistant' && Array.isArray(message.content)) {
+      for (const part of message.content as Array<{ type?: string; id?: string; name?: string }>) {
+        if (part.type === 'tool-call' && typeof part.id === 'string' && typeof part.name === 'string') names.set(part.id, part.name)
+      }
+    } else if (message?.role === 'tool' && typeof message.toolCallId === 'string') {
+      const name = names.get(message.toolCallId)
+      if (name !== undefined && ownTools.has(name)) return true
+    }
   }
   return false
 }

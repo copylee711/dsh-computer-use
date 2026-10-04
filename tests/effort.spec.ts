@@ -20,8 +20,14 @@ describe('quick steps', () => {
     expect(isOperating([], OWN)).toBe(false)
   })
 
+  it('stays lowered for the rest of the turn, so no thinking request follows a reply written without thinking', () => {
+    // The user's failing run: computer use, then a shell command to verify the file.
+    expect(isOperating([user, calls('a', 'computer'), result('a'), calls('b', 'bash'), result('b')], OWN)).toBe(true)
+    expect(isOperating([user, calls('a', 'bash'), result('a'), calls('b', 'computer'), result('b'), calls('c', 'bash'), result('c')], OWN)).toBe(true)
+  })
+
   it('does not match a result to a call from an earlier turn', () => {
-    expect(isOperating([calls('a', 'computer'), result('a'), calls('b', 'bash'), result('a')], OWN)).toBe(false)
+    expect(isOperating([user, calls('a', 'computer'), result('a'), user, calls('b', 'bash'), result('a')], OWN)).toBe(false)
   })
 
   it('picks the lowest effort the model advertises, and nothing when it advertises none', () => {

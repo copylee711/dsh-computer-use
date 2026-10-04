@@ -131,3 +131,20 @@ opencode go 的 DeepSeek V4.1 Flash 只提供 Low / High / Max（界面上的 De
 | 给模型另外声明 Off、关 | 5 | 25.6 秒 | 326 / 443 / 123 / 0 / 0 |
 
 结论：Low 并没有让它少想；这条线路每轮 2.5–5 秒，与是否思考关系不大；完全不思考的那一次多走了 10 步。每种只有 1 次，只能说明在 opencode go 上这个开关没有可见收益。
+
+## 0.7.2：quickSteps 在同一轮里保持到底
+
+用户在桌面版用官方模型开启 quickSteps 后，任务做完了但本轮以 `The content[].thinking in the thinking mode must be passed back to the API`（INVALID_REQUEST）结束。会话日志：操作电脑的几步思考为 0，随后模型调用了命令行工具核对文件；命令行结果之后的那次请求不再紧跟本插件的工具，于是恢复了思考，而 DeepSeek 在思考模式下要求本轮此前带工具调用的回复都带着思考内容，前面那几步没有，请求被拒。
+
+修改：只要本轮（用户最后一条消息之后）出现过本插件工具的结果，本轮之后的所有请求都保持最低思考强度。下一轮从用户的新消息开始，恢复会话的思考强度。
+
+验证（隔离的 `dsh web` 0.2.0-rc.2，DeepSeek 官方接口，任务为“计算器算数后关闭，再用命令行看时间”）：
+
+- 开启 quickSteps 跑 3 次：操作之后调用命令行的那些请求思考均为 0，没有再出现 INVALID_REQUEST。
+- 其中 2 次接着发了第二轮提问：第二轮恢复思考（309、482 字）并正常完成，说明上一轮不带思考的回复不影响下一轮。
+- `pnpm typecheck`、`pnpm test`（11 个文件 108 项）通过。
+
+发现但没有解决的：
+
+- 开启 quickSteps 的 3 次里有 2 次，本轮因 `DeepSeek Messages stream: tool input is invalid JSON`（MALFORMED_RESPONSE）结束，都发生在不思考的步骤上；关闭 quickSteps 的 3 次对照没有出现。样本很小，但指向“不思考时模型更容易写坏工具参数”。0.7.0 的 4 次开启测试里没有出现过。
+- 每步模型耗时：开启 1.0–2.0 秒，关闭 0.8–3.5 秒（个别 5.5 秒）。

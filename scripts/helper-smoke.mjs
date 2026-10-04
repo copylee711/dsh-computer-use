@@ -7,6 +7,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { HelperClient, ensureHelperExe } from '../lib/types/helper-client.js'
+import { matchTarget } from '../lib/types/target.js'
 
 const out = new URL('../.smoke/', import.meta.url)
 mkdirSync(out, { recursive: true })
@@ -56,6 +57,30 @@ if (process.argv.includes('--notepad')) {
     console.log('editor value:', JSON.stringify(doc?.value))
     console.log(doc?.value?.startsWith('你好，DeepSeek！Computer use 测试 123') ? 'PASS: typed text matches' : 'CHECK: text mismatch')
     await shot('notepad.jpg')
+
+    // Reading the window as text, and finding controls by name (also inside an open menu).
+    let started = Date.now()
+    const read = await helper.call('text', { tail: 2000 })
+    console.log(`window text (${read.source}, ${read.length} chars, ${Date.now() - started} ms):`, JSON.stringify(read.text.slice(0, 60)))
+    console.log(read.text.includes('Computer use 测试 123') ? 'PASS: text command reads the document' : 'CHECK: text command did not return the document')
+    started = Date.now()
+    const controls = (await helper.call('ui', { includeText: true, popups: true, maxNodes: 400 })).elements
+    const menu = matchTarget(controls, '文件')
+    console.log(`target "文件": ${menu.kind}${menu.kind === 'found' ? ` (${menu.element.role} "${menu.element.name}")` : ''} among ${controls.length} controls in ${Date.now() - started} ms`)
+    if (menu.kind === 'found' && await ours()) {
+      const el = menu.element
+      await helper.call('click', { x: Math.round(el.x + el.width / 2), y: Math.round(el.y + el.height / 2), button: 'left', count: 1, modifiers: [] })
+      let item
+      started = Date.now()
+      for (let i = 0; i < 15 && item?.kind !== 'found'; i++) {
+        await sleep(200)
+        item = matchTarget((await helper.call('ui', { includeText: true, popups: true, maxNodes: 400 })).elements, '另存为')
+      }
+      console.log(item?.kind === 'found' ? `PASS: menu item "${item.element.name}" found in the open menu after ${Date.now() - started} ms` : `CHECK: "另存为" not found in the open menu (${item?.kind})`)
+      // Close the menu again; Esc goes to our own Notepad only.
+      if (await ours()) await helper.call('keys', { combos: [[0x1B]] })
+      await sleep(300)
+    }
     if (await ours()) await helper.call('keys', { combos: [[0x11, 0x53], [0x11, 0x57]] }) // ctrl+s, ctrl+w on our own file
     await sleep(500)
   }

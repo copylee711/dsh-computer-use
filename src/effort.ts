@@ -52,3 +52,24 @@ export function lowestEffort(efforts: readonly { id: string }[] | undefined): st
   const pick = LOWEST.find(id => ids.has(id))
   return pick === undefined ? undefined : efforts.find(effort => String(effort.id).toLowerCase() === pick)!.id
 }
+
+/**
+ * Without deliberation the model now and then writes a tool call whose
+ * arguments are not valid JSON, which the adapter raises as
+ * MALFORMED_RESPONSE and which would end the turn. Such a reply is thrown
+ * away and asked for again. The reply is held back until it is complete, as
+ * events already passed on could not be taken back.
+ */
+export async function* retryMalformed<T>(run: () => AsyncIterable<T>, attempts = 3): AsyncGenerator<T> {
+  for (let attempt = 1; ; attempt++) {
+    const events: T[] = []
+    try {
+      for await (const event of run()) events.push(event)
+    } catch (error) {
+      if (attempt < attempts && (error as { code?: unknown } | null)?.code === 'MALFORMED_RESPONSE') continue
+      throw error
+    }
+    yield* events
+    return
+  }
+}

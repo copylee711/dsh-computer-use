@@ -425,6 +425,30 @@ describe('progress card', () => {
     expect(helper.calls.some(c => c.cmd === 'pet_finish')).toBe(true)
     expect(helper.calls.some(c => c.cmd === 'overlay_hide')).toBe(false)
   })
+
+  it('lets go of the screen when the agent goes on with other tools', async () => {
+    const helper = new FakeHelper()
+    const overlay = new OverlayController(helper, () => SETTINGS, () => {})
+    const agent = { cancel: () => {} }
+    overlay.stream(agent, { type: 'start' })
+    await overlay.begin(agent, '截图')
+    overlay.toolStarted(agent, 'office_edit', '')
+    overlay.toolStarted(agent, 'office_read', '')
+    expect(overlay.controller).toBe(agent)
+    // A computer action in between starts the count again.
+    await overlay.begin(agent, '点击')
+    overlay.toolStarted(agent, 'office_edit', '')
+    overlay.toolStarted(agent, 'office_edit', '')
+    expect(overlay.controller).toBe(agent)
+    overlay.toolStarted(agent, 'office_save', '')
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(overlay.controller).toBeUndefined()
+    expect(helper.calls.some(c => c.cmd === 'overlay_hide')).toBe(true)
+    // The next computer action shows it again.
+    await overlay.begin(agent, '截图')
+    expect(helper.calls.filter(c => c.cmd === 'overlay_show').length).toBe(2)
+    await overlay.end(agent)
+  })
 })
 
 describe('app skills in tools', () => {

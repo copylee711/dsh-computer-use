@@ -65,6 +65,13 @@ interface DisplayRow { x: number; y: number; width: number; height: number; work
  * starts of any plugin count, so a slow shell command does not end the run.
  */
 const IDLE_HIDE_MS = 10 * 60_000
+/**
+ * The agent stays busy but has stopped operating the computer (it looked at the screen once and went on with
+ * other tools): the glow and the card go after this long without a computer action, or sooner once it has
+ * started this many tools of other plugins in a row. The next computer action brings them back.
+ */
+const UNUSED_HIDE_MS = 90_000
+const UNUSED_AFTER_TOOLS = 3
 /** A pause longer than this ends the tool call with a message for the model. */
 const MAX_PAUSE_MS = 25 * 60_000
 
@@ -86,6 +93,8 @@ export class OverlayController {
   private agent: CancellableAgent | undefined
   private visible = false
   private idleTimer: NodeJS.Timeout | undefined
+  private unusedTimer: NodeJS.Timeout | undefined
+  private otherTools = 0
   private hostWindows: Array<{ hwnd: number; mode: 'card' | 'minimize' }> = []
   private stopping = false
   /** Progress card lines: the reply as it streams, and what the agent is doing. */
@@ -166,6 +175,7 @@ export class OverlayController {
   async begin(agent: CancellableAgent | undefined, status: string): Promise<void> {
     if (agent) this.agent = agent
     this.armIdle()
+    this.armUnused()
     const settings = this.settings()
     if (!this.visible) {
       this.visible = true
@@ -202,6 +212,7 @@ export class OverlayController {
   async status(status: string): Promise<void> {
     const settings = this.settings()
     if (!this.visible) return
+    this.armUnused()
     if (settings.hostWindow === 'pet') { this.step(status); return }
     if (settings.overlay) await this.helper.call('overlay_status', { status }).catch(() => {})
   }
@@ -235,7 +246,14 @@ export class OverlayController {
   /** A tool of another plugin started (computer-use tools report their own steps). */
   toolStarted(agent: unknown, name: string, detail: string): void {
     if (agent !== this.streamAgent) return
-    if (this.visible && agent === this.agent) this.armIdle()
+    if (this.visible && agent === this.agent) {
+      this.armIdle()
+      if (++this.otherTools >= UNUSED_AFTER_TOOLS && !this.paused) {
+        this.log('computer use not used for a while (other tools running): overlay released')
+        void this.end()
+        return
+      }
+    }
     this.step(`${TOOL_NAMES[name] ?? name}${detail ? `：${detail}` : ''}`)
   }
 
@@ -256,6 +274,9 @@ export class OverlayController {
     if (agent !== undefined && this.agent !== undefined && agent !== this.agent) return
     if (this.idleTimer) clearTimeout(this.idleTimer)
     this.idleTimer = undefined
+    if (this.unusedTimer) clearTimeout(this.unusedTimer)
+    this.unusedTimer = undefined
+    this.otherTools = 0
     this.agent = undefined
     this.paused = false
     if (!this.visible) return
@@ -274,6 +295,19 @@ export class OverlayController {
     this.log(`computer use stopped by the user (${reason})`)
     try { agent?.cancel({ kind: 'user' }) } catch (error) { this.log(`cancel failed: ${String(error)}`) }
     void this.end().finally(() => { this.stopping = false })
+  }
+
+  /** Counted from the last computer action only: model output and other tools do not keep the overlay up. */
+  private armUnused(): void {
+    this.otherTools = 0
+    if (this.unusedTimer) clearTimeout(this.unusedTimer)
+    this.unusedTimer = setTimeout(() => {
+      // Waiting for the user (paused) is not "unused": the run resumes where it stopped.
+      if (this.paused) { this.armUnused(); return }
+      this.log('computer use not used for a while: overlay released')
+      void this.end()
+    }, UNUSED_HIDE_MS)
+    this.unusedTimer.unref()
   }
 
   private armIdle(): void {

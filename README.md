@@ -1,4 +1,4 @@
-# dsh-computer-use
+# dsh-computer-use from scut
 
 [![npm](https://img.shields.io/npm/v/@copylee/dsh-computer-use)](https://www.npmjs.com/package/@copylee/dsh-computer-use)
 

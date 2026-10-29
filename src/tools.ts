@@ -7,6 +7,7 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { defineTool, type ToolCallView } from '@deepseek-ai/dsh-tools'
 import { appMatches, isHostWindow, isTransientShell, normalizeApp } from './access.js'
 import { SKILL_MAX_CHARS, type SkillStore } from './skills.js'
+import type { UiElement } from './target.js'
 import { ACTIONS, Computer, UNCHANGED_TEXT, type ActionInput, type CallContext, type Shot, type WindowInfo } from './computer.js'
 
 type ToolDefinition = ReturnType<typeof defineTool>
@@ -388,13 +389,13 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     async execute(args): Promise<Value> {
       const { hwnd, include_text: includeText, max, text, tail } = args as { hwnd?: number; include_text?: boolean; max?: number; text?: boolean; tail?: number }
       if (text === true) return { text: await windowText(computer, hwnd, tail) }
-      const result = await computer.helper.call<WindowInfo & { elements: Array<{ role: string; name: string; value?: string; checked?: boolean; disabled?: boolean; x: number; y: number; width: number; height: number }> }>('ui', {
+      const result = await computer.helper.call<WindowInfo & { elements: UiElement[] }>('ui', {
         ...(hwnd === undefined ? {} : { hwnd }), includeText: includeText === true, popups: true, maxNodes: Math.min(400, Math.max(10, max ?? 120)),
       }, 20_000)
       const lines: string[] = []
       for (const [index, el] of result.elements.entries()) {
         const center = await computer.toModel({ x: el.x + el.width / 2, y: el.y + el.height / 2 })
-        const flags = [el.value !== undefined ? `value="${el.value}"` : '', el.checked !== undefined ? (el.checked ? 'checked' : 'unchecked') : '', el.disabled ? 'disabled' : '', center.offscreen ? 'other display' : ''].filter(Boolean).join(' ')
+        const flags = [el.value !== undefined ? `value="${el.value}"` : '', el.checked !== undefined ? (el.checked ? 'checked' : 'unchecked') : '', el.disabled ? 'disabled' : '', el.automationId ? `automationId=${JSON.stringify(el.automationId)}` : '', el.focusable !== undefined ? `focusable=${el.focusable}` : '', el.editable ? 'editable' : '', center.offscreen ? 'other display' : ''].filter(Boolean).join(' ')
         lines.push(`[${index}] ${el.role} "${el.name}" @ (${center.x}, ${center.y})${flags ? ` ${flags}` : ''}`)
       }
       const head = `${result.exe} — "${String(result.title ?? '').slice(0, 80)}": ${result.elements.length} elements.`

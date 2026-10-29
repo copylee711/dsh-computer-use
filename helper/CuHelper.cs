@@ -77,6 +77,8 @@ namespace DshComputerUse
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr hwnd, StringBuilder sb, int max);
         [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hwnd);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr hwnd, StringBuilder sb, int max);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string title);
+        [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
         [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hwnd, uint cmd);
         [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hwnd, int index);
         [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hwnd, int index, int value);
@@ -1693,7 +1695,98 @@ namespace DshComputerUse
             ControlType.Button, ControlType.Edit, ControlType.Hyperlink, ControlType.MenuItem, ControlType.ListItem,
             ControlType.TabItem, ControlType.CheckBox, ControlType.RadioButton, ControlType.ComboBox, ControlType.TreeItem,
             ControlType.DataItem, ControlType.SplitButton, ControlType.Slider, ControlType.Spinner, ControlType.Document,
-            ControlType.MenuBar, ControlType.Menu, ControlType.ScrollBar };
+            ControlType.MenuBar, ControlType.Menu, ControlType.ScrollBar, ControlType.Group };
+
+        // Wake the renderer, but keep collecting the window too: browser tabs,
+        // toolbars and the address bar are outside the renderer's subtree.
+        static IntPtr ChromiumRoot(IntPtr hwnd)
+        {
+            try
+            {
+                var cls = new StringBuilder(256);
+                Native.GetClassName(hwnd, cls, cls.Capacity);
+                if (!cls.ToString().StartsWith("Chrome_WidgetWin", StringComparison.Ordinal)) return hwnd;
+                IntPtr render = IntPtr.Zero;
+                while ((render = Native.FindWindowEx(hwnd, render, "Chrome_RenderWidgetHostHWND", null)) != IntPtr.Zero)
+                    if (Native.IsWindowVisible(render)) return render;
+                return hwnd;
+            }
+            catch { return hwnd; }
+        }
+
+        static bool IsEditorClass(string cls)
+        {
+            if (string.IsNullOrEmpty(cls)) return false;
+            string[] marks = { "ProseMirror", "tiptap", "CodeMirror", "monaco-editor", "ql-editor" };
+            foreach (var mark in marks)
+                if (cls.IndexOf(mark, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            return false;
+        }
+
+        // Chromium builds its accessibility tree lazily. A standard AT request
+        // (WM_GETOBJECT/OBJID_CLIENT) wakes it; without this, apps such as
+        // VS Code expose only a few nodes even though the render host exists.
+        static void WakeAccessibility(IntPtr hwnd)
+        {
+            try
+            {
+                IntPtr result;
+                Native.SendMessageTimeout(hwnd, 0x003D /* WM_GETOBJECT */, IntPtr.Zero,
+                    new IntPtr(-4) /* OBJID_CLIENT */, 0x0002 /* SMTO_ABORTIFHUNG */, 1000, out result);
+            }
+            catch { }
+        }
+
+        // A broken provider may never return. Bound background queries rather
+        // than creating an unbounded number of stuck threads on repeated reads.
+        static readonly SemaphoreSlim WindowCollectors = new SemaphoreSlim(4, 4);
+
+        static List<object> CollectWindow(IntPtr hwnd, int max, bool includeText)
+        {
+            IntPtr render = ChromiumRoot(hwnd);
+            if (render == hwnd) return Collect(hwnd, max, includeText);
+            WakeAccessibility(render);
+            List<object> window = null;
+            Exception windowError = null;
+            Thread windowWorker = null;
+            if (WindowCollectors.Wait(0))
+            {
+                windowWorker = new Thread(delegate ()
+                {
+                    try { window = Collect(hwnd, max, includeText); }
+                    catch (Exception ex) { windowError = ex; }
+                    finally { WindowCollectors.Release(); }
+                });
+                windowWorker.IsBackground = true;
+                windowWorker.SetApartmentState(ApartmentState.MTA);
+                windowWorker.Start();
+            }
+            // Electron can take >16s at the top level while its renderer takes
+            // <1s. Read independently; a slow/failed window must not lose DOM controls.
+            List<object> content = null;
+            Exception contentError = null;
+            try { content = Collect(render, max, includeText); }
+            catch (Exception ex) { contentError = ex; }
+            bool windowReady = windowWorker != null && windowWorker.Join(1000);
+            var result = windowReady && window != null ? window : new List<object>();
+            if (content == null && result.Count == 0 && contentError != null)
+                throw windowReady && windowError != null ? windowError : contentError;
+            if (content != null && result.Count < max)
+            {
+                foreach (Dictionary<string, object> extra in content)
+                {
+                    bool duplicate = false;
+                    foreach (Dictionary<string, object> item in result)
+                        if (Equals(item["role"], extra["role"]) && Equals(item["name"], extra["name"])
+                            && Equals(item["x"], extra["x"]) && Equals(item["y"], extra["y"])
+                            && Equals(item["width"], extra["width"]) && Equals(item["height"], extra["height"]))
+                        { duplicate = true; break; }
+                    if (!duplicate) result.Add(extra);
+                    if (result.Count >= max) break;
+                }
+            }
+            return result;
+        }
 
         public static object Elements(Dictionary<string, object> r)
         {
@@ -1710,14 +1803,14 @@ namespace DshComputerUse
                     if (popupsOnly) result = new List<object>();
                     else
                     {
-                        result = Collect(hwnd, max, all);
-                        if (result.Count < 4) { Thread.Sleep(400); result = Collect(hwnd, max, all); } // Chromium builds its tree lazily
+                        result = CollectWindow(hwnd, max, all);
+                        if (result.Count < 4) { Thread.Sleep(400); result = CollectWindow(hwnd, max, all); } // Chromium builds its tree lazily
                     }
                     // An open menu or flyout is a window of its own, not a descendant of the one it belongs to.
                     if (popups || popupsOnly) foreach (var extra in Popups(hwnd))
                     {
                         if (result.Count >= max) break;
-                        try { result.AddRange(Collect(extra, max - result.Count, all)); } catch (Exception) { }
+                        try { result.AddRange(CollectWindow(extra, max - result.Count, all)); } catch (Exception) { }
                     }
                 }
                 catch (Exception ex) { error = ex; }
@@ -1856,6 +1949,8 @@ namespace DshComputerUse
             cache.Add(AutomationElement.BoundingRectangleProperty);
             cache.Add(AutomationElement.IsEnabledProperty);
             cache.Add(AutomationElement.AutomationIdProperty);
+            cache.Add(AutomationElement.ClassNameProperty);
+            cache.Add(AutomationElement.IsKeyboardFocusableProperty);
             cache.Add(ValuePattern.ValueProperty);
             cache.Add(TogglePattern.ToggleStateProperty);
             cache.AutomationElementMode = AutomationElementMode.None;
@@ -1870,9 +1965,17 @@ namespace DshComputerUse
                 if (rect.IsEmpty || rect.Width < 2 || rect.Height < 2) continue;
                 var type = (ControlType)el.GetCachedPropertyValue(AutomationElement.ControlTypeProperty);
                 string name = (el.GetCachedPropertyValue(AutomationElement.NameProperty) as string) ?? "";
+                string cls = (el.GetCachedPropertyValue(AutomationElement.ClassNameProperty) as string) ?? "";
+                // Web 编辑器的 contenteditable 常是 Group（ProseMirror/tiptap 等），
+                // 不是 Edit；保留这类 Group，其余 Group 跳过，避免淹没按钮。
+                if (type == ControlType.Group && !IsEditorClass(cls)) continue;
                 var d = new Dictionary<string, object>();
-                d["role"] = type.ProgrammaticName.Replace("ControlType.", "");
+                d["role"] = type == ControlType.Group ? "Edit" : type.ProgrammaticName.Replace("ControlType.", "");
+                if (type == ControlType.Group) d["editable"] = true;
                 d["name"] = name.Length > 120 ? name.Substring(0, 120) + "…" : name;
+                string aid = (el.GetCachedPropertyValue(AutomationElement.AutomationIdProperty) as string) ?? "";
+                if (aid.Length > 0) d["automationId"] = aid.Length > 120 ? aid.Substring(0, 120) + "…" : aid;
+                d["focusable"] = (bool)el.GetCachedPropertyValue(AutomationElement.IsKeyboardFocusableProperty);
                 object value = el.GetCachedPropertyValue(ValuePattern.ValueProperty, true);
                 if (value is string && ((string)value).Length > 0) { var v = (string)value; d["value"] = v.Length > 120 ? v.Substring(0, 120) + "…" : v; }
                 object toggle = el.GetCachedPropertyValue(TogglePattern.ToggleStateProperty, true);

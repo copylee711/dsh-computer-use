@@ -12,6 +12,12 @@ export interface UiElement {
   value?: string
   checked?: boolean
   disabled?: boolean
+  /** UIA AutomationId when the app exposes one; more stable than Name. */
+  automationId?: string
+  /** Whether the element can take keyboard focus. */
+  focusable?: boolean
+  /** True for web contenteditable composers (ProseMirror/tiptap/CodeMirror...). */
+  editable?: boolean
   x: number
   y: number
   width: number

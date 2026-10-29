@@ -36,7 +36,7 @@
 | 不弄乱剪贴板 | 插件写入剪贴板的内容不进 Windows 剪贴板历史（Win+V）和云剪贴板；粘贴后按原样恢复你的剪贴板（图片、文件也保留）；AI 用 `clipboard` 工具写过剪贴板的，本轮结束后自动还原（期间你自己复制了新内容则不动） |
 | 应用技能 | AI 对各个应用的操作笔记，每个应用一份 Markdown（`~/.dsh/computer-use-skills/`）。AI 摸索清楚一个不熟悉的应用后用 `app_skill` 自己记下来（只记操作规律，不记任务内容），以后 `open_application` 打开该应用时自动附带，不占系统提示。自带 Word、PowerPoint、Excel、Chrome、文件资源管理器、Obsidian、Typora、微信、QQ、记事本十份内置技能（含各应用的快捷键清单，PowerPoint 含原生公式和动画的做法）；AI 在内置技能上追加的笔记单独保存，内置部分随插件更新；设置页“应用技能”里可以查看、修改、删除、新建，内置技能可覆盖和恢复 |
 | 打开应用 | `open_application` 同时搜索开始菜单和桌面快捷方式（含公共桌面），便携软件也能按名字打开。已经关到系统托盘的应用（QQ、微信等）会像人一样点托盘图标把窗口叫回来（必要时先展开“显示隐藏的图标”），不会再启动第二个实例、也不会重复登录；你明确要多开时（如微信双开）AI 会用 `new_instance` 另开一个。任务结束时 AI 会收拾现场：关掉自己打开、你不再需要的窗口，`windows tidy` 把原本最小化或在托盘里的应用重新最小化 |
-| 看不见图的模型 | `ui_elements` 用 Windows UI Automation 列出可点击元素和坐标，纯文本模型也能用 |
+| 看不见图的模型 | `ui_elements` 用 Windows UI Automation 列出可点击元素和坐标，纯文本模型也能用。Chromium / Electron 会先唤醒无障碍树，同时保留浏览器标签栏、地址栏等控件；支持识别常见网页编辑器，并返回应用提供的 AutomationId、焦点能力和编辑器标记 |
 | 零原生依赖 | 截图、窗口查询和输入直接调用 DeepSeek Harness 自带的 koffi，不需要额外安装；浮层、UI Automation、剪贴板等由一个小 helper 负责，首次使用时用 Windows 自带的 .NET Framework `csc.exe` 编译（约 1 秒，之后缓存）。不需要 node-gyp，也不受 Electron ABI 影响。开启了智能应用控制（Smart App Control）时，helper 改为在系统自带的 PowerShell 里运行 |
 
 ## 安装

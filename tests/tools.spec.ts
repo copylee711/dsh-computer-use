@@ -579,6 +579,18 @@ describe('one call for a whole sequence', () => {
     expect(value.image).toBeDefined()
   })
 
+  it('exposes editor metadata and targets the editor with the existing input alias', async () => {
+    const t = setup({ mode: 'allow-all' })
+    t.helper.elements = [{ role: 'Edit', name: '消息', automationId: 'composer', focusable: true, editable: true, x: 100, y: 100, width: 400, height: 80 }]
+    const value = await t.run('ui_elements', {})
+    expect(value.text).toContain('Edit "消息"')
+    expect(value.text).toContain('automationId="composer"')
+    expect(value.text).toContain('focusable=true')
+    expect(value.text).toContain('editable')
+    await t.run('computer_batch', { actions: [{ action: 'left_click', target: '输入框:消息' }] })
+    expect(t.helper.calls.find(c => c.cmd === 'click')?.args).toMatchObject({ x: 300, y: 140 })
+  })
+
   it('reads a window as text', async () => {
     const t = setup()
     t.helper.windowText = { text: '最后一段', length: 9000, truncated: true, source: 'text' }

@@ -28,6 +28,8 @@ export interface TargetQuery {
   /** UI Automation control type, when the target named one ("按钮:保存"). */
   role?: string
   name: string
+  /** Explicit AutomationId, when the target was "id:<AutomationId>" or "#<AutomationId>". */
+  automationId?: string
 }
 
 export type TargetMatch =
@@ -49,9 +51,15 @@ const ROLES: Record<string, string[]> = {
   text: ['Text'], 文本: ['Text'], 文字: ['Text'],
 }
 
-/** "按钮:保存" → Button named 保存; a colon that is not after a known role stays part of the name. */
+/** "按钮:保存" → Button named 保存; a colon that is not after a known role stays part of the name.
+ *  "id:NavTasksButton" / "#NavTasksButton" → match the UIA AutomationId instead of the name. */
 export function parseTarget(target: string): TargetQuery & { roles?: string[] } {
   const text = target.trim()
+  if (text.startsWith('#') && text.length > 1) {
+    return { automationId: text.slice(1).trim(), name: '' }
+  }
+  const byId = /^(?:id|automationid|自动化id)\s*[:：]\s*(.+)$/i.exec(text)
+  if (byId) return { automationId: byId[1]!.trim(), name: '' }
   const colon = text.search(/[:：]/)
   if (colon > 0) {
     const roles = ROLES[text.slice(0, colon).trim().toLowerCase().replace(/[\s_-]/g, '')]
@@ -85,6 +93,16 @@ const center = (el: UiElement): string => `${Math.round(el.x + el.width / 2)},${
  */
 export function matchTarget(elements: readonly UiElement[], target: string): TargetMatch {
   const query = parseTarget(target)
+  if (query.automationId) {
+    const wantedId = query.automationId
+    const exact = elements.filter(el => (el.automationId ?? '') === wantedId)
+    const matches = exact.length > 0
+      ? exact
+      : elements.filter(el => (el.automationId ?? '').toLowerCase() === wantedId.toLowerCase())
+    if (matches.length === 1) return { kind: 'found', element: matches[0]! }
+    if (matches.length > 1) return { kind: 'ambiguous', candidates: matches.slice(0, 8) }
+    return { kind: 'missing', suggestions: [] }
+  }
   const wanted = normalizeName(query.name)
   if (wanted === '') return { kind: 'missing', suggestions: [] }
   const pool = query.roles ? elements.filter(el => query.roles!.includes(el.role)) : elements

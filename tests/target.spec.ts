@@ -44,6 +44,24 @@ describe('control targets', () => {
     expect(matchTarget(elements, '按钮:设置')).toMatchObject({ kind: 'found', element: { role: 'Button' } })
   })
 
+  it('matches an explicit AutomationId when names collide', () => {
+    expect(parseTarget('id:NavTasksButton')).toMatchObject({ automationId: 'NavTasksButton' })
+    expect(parseTarget('#NavTasksButton')).toMatchObject({ automationId: 'NavTasksButton' })
+    const elements = [
+      el('Button', '委托任务', 0, 0, { automationId: 'NavTasksButton' }),
+      el('Button', '委托任务', 300, 0, { automationId: 'TasksChipButton' }),
+    ]
+    expect(matchTarget(elements, '委托任务').kind).toBe('ambiguous')
+    expect(matchTarget(elements, 'id:NavTasksButton')).toMatchObject({ kind: 'found', element: { automationId: 'NavTasksButton' } })
+    expect(matchTarget(elements, 'id:navtasksbutton')).toMatchObject({ kind: 'found' })
+    expect(matchTarget(elements, 'id:Missing').kind).toBe('missing')
+  })
+
+  it('reports duplicate AutomationIds as ambiguous', () => {
+    const elements = [el('Button', 'A', 0, 0, { automationId: 'X' }), el('Button', 'B', 300, 0, { automationId: 'X' })]
+    expect(matchTarget(elements, 'id:X').kind).toBe('ambiguous')
+  })
+
   it('suggests what is there when nothing matches', () => {
     const match = matchTarget([el('Button', '保存', 0, 0), el('Button', '取消', 100, 0), el('Text', '说明文字', 200, 0)], '另存')
     expect(match.kind).toBe('missing')

@@ -296,6 +296,7 @@ namespace DshComputerUse
                 case "clipboard_set": if (Args.Bool(r, "agent", false)) Clip.AgentSet(Args.Str(r, "text", "")); else Clip.Set(Args.Str(r, "text", ""), false); return null;
                 case "clipboard_restore": { var d = new Dictionary<string, object>(); d["restored"] = Clip.RestoreAgent(); return d; }
                 case "ui": return Uia.Elements(r);
+                case "act": return Uia.Act(r);
                 case "text": return Uia.Text(r);
                 case "overlay_show": Overlay.ExcludeFromCapture = Args.Bool(r, "excludeFromCapture", true); Overlay.Show(r); return null;
                 case "overlay_pause": Overlay.SetPaused(Args.Bool(r, "paused", false)); return null;
@@ -1822,6 +1823,127 @@ namespace DshComputerUse
             if (error != null) throw error;
             var d = Windows.Describe(hwnd);
             d["elements"] = result;
+            return d;
+        }
+
+        static string Role(AutomationElement el)
+        {
+            return el.Current.ControlType.ProgrammaticName.Replace("ControlType.", "");
+        }
+
+        static AutomationElement Parent(AutomationElement el)
+        {
+            try { return TreeWalker.ControlViewWalker.GetParent(el); } catch { return null; }
+        }
+
+        // Find the live element that matches the descriptor the host resolved from
+        // ui_elements. Rect + role is exact enough; name is skipped when truncated.
+        static AutomationElement FindLive(IntPtr root, Dictionary<string, object> r)
+        {
+            int x = Args.Int(r, "x", int.MinValue);
+            int y = Args.Int(r, "y", int.MinValue);
+            int w = Args.Int(r, "width", 0);
+            int h = Args.Int(r, "height", 0);
+            string role = Args.Str(r, "role", "");
+            string name = Args.Str(r, "name", "");
+            string aid = Args.Str(r, "automationId", "");
+            try
+            {
+                var host = AutomationElement.FromHandle(root);
+                if (host == null) return null;
+                AutomationElementCollection all = host.FindAll(TreeScope.Descendants, Condition.TrueCondition);
+                foreach (AutomationElement el in all)
+                {
+                    System.Windows.Rect rect;
+                    try { rect = el.Current.BoundingRectangle; } catch { continue; }
+                    if (rect.IsEmpty) continue;
+                    if (x != int.MinValue && (Math.Abs(rect.X - x) > 3 || Math.Abs(rect.Y - y) > 3
+                        || Math.Abs(rect.Width - w) > 3 || Math.Abs(rect.Height - h) > 3)) continue;
+                    string actual = Role(el);
+                    bool roleOk = role == "" || actual == role
+                        || (role == "Edit" && (actual == "Edit" || actual == "Document" || actual == "Group"));
+                    if (!roleOk) continue;
+                    if (aid != "" && el.Current.AutomationId != aid) continue;
+                    if (name != "" && !name.EndsWith("…") && el.Current.Name != name) continue;
+                    return el;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        static string TryInvoke(AutomationElement el)
+        {
+            object p;
+            try { if (el.TryGetCurrentPattern(InvokePattern.Pattern, out p)) { ((InvokePattern)p).Invoke(); return "InvokePattern"; } } catch { }
+            try { if (el.TryGetCurrentPattern(SelectionItemPattern.Pattern, out p)) { ((SelectionItemPattern)p).Select(); return "SelectionItemPattern"; } } catch { }
+            try { if (el.TryGetCurrentPattern(TogglePattern.Pattern, out p)) { ((TogglePattern)p).Toggle(); return "TogglePattern"; } } catch { }
+            try
+            {
+                if (el.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out p))
+                {
+                    var ec = (ExpandCollapsePattern)p;
+                    if (ec.Current.ExpandCollapseState == ExpandCollapseState.Collapsed) ec.Expand();
+                    return "ExpandCollapsePattern";
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>Semantic action on a resolved element: invoke a pattern or set focus.
+        /// Returns performed=false so the host can fall back to a coordinate click.</summary>
+        public static object Act(Dictionary<string, object> r)
+        {
+            var d = new Dictionary<string, object>();
+            d["ok"] = true;
+            d["performed"] = false;
+            string action = Args.Str(r, "action", "");
+            try
+            {
+                IntPtr hwnd = Args.Has(r, "hwnd") ? new IntPtr(Convert.ToInt64(r["hwnd"])) : Native.GetForegroundWindow();
+                IntPtr root = ChromiumRoot(hwnd);
+                if (root != hwnd) { WakeAccessibility(root); System.Threading.Thread.Sleep(150); }
+                var target = FindLive(root, r);
+                if (target == null) { d["reason"] = "element not found"; return d; }
+
+                if (action == "focus")
+                {
+                    for (var el = target; el != null; el = Parent(el))
+                    {
+                        try
+                        {
+                            el.SetFocus();
+                            System.Threading.Thread.Sleep(60);
+                            if (el.Current.HasKeyboardFocus)
+                            {
+                                d["performed"] = true; d["pattern"] = "SetFocus";
+                                d["role"] = Role(el); d["name"] = el.Current.Name;
+                                return d;
+                            }
+                        }
+                        catch { }
+                        if (el.Current.ControlType == ControlType.Window) break;
+                    }
+                    return d;
+                }
+
+                if (action == "invoke")
+                {
+                    for (var el = target; el != null; el = Parent(el))
+                    {
+                        string pattern = TryInvoke(el);
+                        if (pattern != null)
+                        {
+                            d["performed"] = true; d["pattern"] = pattern;
+                            d["role"] = Role(el); d["name"] = el.Current.Name;
+                            return d;
+                        }
+                        if (el.Current.ControlType == ControlType.Window) break;
+                    }
+                }
+            }
+            catch (Exception ex) { d["reason"] = ex.Message; }
             return d;
         }
 

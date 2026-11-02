@@ -118,6 +118,12 @@ export interface ActionOutcome {
 const INPUT = new Set<Action>([...MUTATING].filter(action => action !== 'mouse_move'))
 
 /** Actions whose input goes to the foreground window. */
+type UiaActResult = { performed?: boolean; pattern?: string; reason?: string }
+const uiaDescriptor = (el: UiElement) => ({
+  x: Math.round(el.x), y: Math.round(el.y), width: Math.round(el.width), height: Math.round(el.height),
+  role: el.role, name: el.name, automationId: el.automationId ?? '',
+})
+
 const KEYBOARD = new Set<Action>(['type', 'key', 'hold_key'])
 
 /** Below this fraction of changed sample pixels, the screen counts as unchanged. */
@@ -469,10 +475,10 @@ export class Computer {
   }
 
   /** The point an action aims at: a named control, a coordinate, or nothing (the cursor). */
-  private async aim(input: ActionInput, call: CallContext): Promise<{ point: Point | undefined; label: string }> {
+  private async aim(input: ActionInput, call: CallContext): Promise<{ point: Point | undefined; label: string; element?: UiElement }> {
     if (typeof input.target === 'string' && input.target.trim() !== '') {
       const { point, element } = await this.locate(input.target, call.signal)
-      return { point, label: ` on ${element.role} "${element.name.slice(0, 60)}"` }
+      return { point, label: ` on ${element.role} "${element.name.slice(0, 60)}"`, element }
     }
     if (input.coordinate) return { point: await this.point(input.coordinate), label: ` at (${input.coordinate.join(', ')})` }
     return { point: undefined, label: ' at the cursor' }
@@ -591,12 +597,23 @@ export class Computer {
         return { text: `Moved the mouse${label.replace(/^ (at|on)/, ' to')}.` }
       }
       case 'left_click': case 'right_click': case 'middle_click': case 'double_click': case 'triple_click': {
-        const { point: p, label } = await this.aim(input, call)
+        const { point: p, label, element } = await this.aim(input, call)
         await this.checkPointer(call, p, 'click')
         const button = action === 'right_click' ? 'right' : action === 'middle_click' ? 'middle' : 'left'
         const count = action === 'double_click' ? 2 : action === 'triple_click' ? 3 : 1
         // Anthropic's schema passes click modifiers in `text`.
         const modifiers = parseModifiers(input.modifiers ?? input.text)
+        if (action === 'left_click' && element && modifiers.length === 0) {
+          const semantic = element.role === 'Edit' || element.editable ? 'focus' : 'invoke'
+          const acted = await this.helper.call<UiaActResult>('act', { action: semantic, ...uiaDescriptor(element) }, 4000)
+            .catch(() => undefined)
+          if (acted?.performed) {
+            const via = acted.pattern ? ` via ${acted.pattern}` : ''
+            return { text: semantic === 'focus'
+              ? `Focused ${element.role} "${element.name.slice(0, 60)}"${via}.`
+              : `Invoked ${element.role} "${element.name.slice(0, 60)}"${via}.` }
+          }
+        }
         await this.helper.call('click', { ...(p ?? {}), button, count, modifiers })
         return { text: `${action.replace('_', ' ')}${label}${modifiers.length ? ` holding ${input.modifiers ?? input.text}` : ''}.` }
       }
@@ -629,12 +646,20 @@ export class Computer {
         if (text === '') throw new Error('type needs text.')
         let into = ''
         if (input.target || input.coordinate) {
-          // Click the field first: that is what gives it the keyboard.
-          const { point: p, label } = await this.aim(input, call)
+          const { point: p, label, element } = await this.aim(input, call)
           await this.checkPointer(call, p, 'click')
-          await this.helper.call('click', { ...(p ?? {}), button: 'left', count: 1, modifiers: [] })
+          let focused = false
+          if (element) {
+            const acted = await this.helper.call<UiaActResult>('act', { action: 'focus', ...uiaDescriptor(element) }, 3000)
+              .catch(() => undefined)
+            focused = !!acted?.performed
+          }
+          if (!focused) {
+            // Click the field: that is what gives it the keyboard when UIA focus is unavailable.
+            await this.helper.call('click', { ...(p ?? {}), button: 'left', count: 1, modifiers: [] })
+          }
           await sleep(120, undefined, { signal: call.signal })
-          into = ` (clicked${label} first)`
+          into = focused ? ` (focused${label} first)` : ` (clicked${label} first)`
         }
         await this.checkKeyboard(call, 'type into')
         return { text: `${await this.enterText(text, call)}${into}` }

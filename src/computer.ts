@@ -5,6 +5,7 @@
  */
 import { setTimeout as sleep } from 'node:timers/promises'
 import { appMatches, isHostWindow, isTransientShell, type AccessControl, type AccessMode, type WindowLike } from './access.js'
+import { isBrowser, isHarnessAddress, readBrowserTab } from './browser-host.js'
 import { contains, regionToPhysical, screenshotSize, toPhysical, toScreenshot, type Display, type Point, type Size } from './coords.js'
 import type { HelperLike } from './helper-client.js'
 import { parseKeys, parseModifiers } from './keys.js'
@@ -13,6 +14,8 @@ import { splitBlocks, typingPieces } from './text.js'
 import type { CancellableAgent, HostWindowMode, OverlayController } from './overlay.js'
 
 export interface Settings {
+  /** Web GUI origin, inferred from the local web server unless configured. */
+  harnessUrl?: string | undefined
   accessMode: AccessMode
   blockedApps: string[]
   overlay: boolean
@@ -370,19 +373,45 @@ export class Computer {
     return `Foreground window: ${win.exe} — "${win.title.slice(0, 80)}".`
   }
 
-  private assertAllowed(call: CallContext, win: WindowInfo | undefined, verb: string): void {
+  async assertAllowed(call: CallContext, win: WindowInfo | undefined, verb: string): Promise<void> {
     const s = this.settings()
     const reason = this.access.denial(call.session, win, s.accessMode, s.blockedApps, verb)
     if (reason) throw new Error(reason)
+    if (win && s.harnessUrl && isBrowser(win)) {
+      const tab = await readBrowserTab(this.helper, win)
+      if (isHarnessAddress(tab?.url, s.harnessUrl) || this.overlay.isRememberedWebWindow(win))
+        throw new Error('The DeepSeek Harness Web tab is protected. Use open_application with a URL to open a separate browser window.')
+      if (typeof tab?.url !== 'string' || !tab.tab)
+        throw new Error('Could not verify the active browser tab. Use open_application with a URL or switch to a browser window with a visible address bar.')
+    }
   }
 
   private async checkPointer(call: CallContext, point: Point | undefined, verb: string): Promise<void> {
     const target = point ?? await this.cursor()
-    this.assertAllowed(call, await this.windowAt(target), verb)
+    await this.assertAllowed(call, await this.windowAt(target), verb)
   }
 
-  private async checkKeyboard(call: CallContext, verb: string): Promise<void> {
-    this.assertAllowed(call, await this.foreground(), verb)
+  private async checkKeyboard(call: CallContext, verb: string): Promise<WindowInfo | undefined> {
+    const window = await this.foreground()
+    await this.assertAllowed(call, window, verb)
+    return window
+  }
+
+  private async sendKeys(call: CallContext, combos: number[][], holdMs?: number): Promise<void> {
+    const window = await this.checkKeyboard(call, 'send keys to')
+    const args = holdMs === undefined ? {} : { holdMs }
+    if (!this.settings().harnessUrl || !window || !isBrowser(window) || combos.length < 2) {
+      await this.helper.call('keys', { combos, ...args }, holdMs === undefined ? undefined : 20_000)
+      return
+    }
+    // A chord can change the active browser tab without changing the HWND.
+    for (const [index, combo] of combos.entries()) {
+      if (index > 0) {
+        await sleep(100, undefined, { signal: call.signal })
+        await this.checkNamed(call, window)
+      }
+      await this.helper.call('keys', { combos: [combo], ...args }, holdMs === undefined ? undefined : 20_000)
+    }
   }
 
   // -------------------------------------------------------------- actions
@@ -419,19 +448,20 @@ export class Computer {
    * own). They are read separately because scanning both costs a second or
    * more on a file dialog, and the control is nearly always in the window.
    */
-  async elements(where: 'window' | 'popups' = 'window'): Promise<UiElement[]> {
+  async elements(where: 'window' | 'popups' = 'window', hwnd?: number): Promise<UiElement[]> {
     const result = await this.helper.call<{ elements?: UiElement[] }>('ui', {
+      ...(hwnd === undefined ? {} : { hwnd }),
       includeText: true, maxNodes: 400, ...(where === 'popups' ? { popupsOnly: true } : {}),
     }, 20_000)
     return Array.isArray(result.elements) ? result.elements : []
   }
 
   /** Look for a named control in the window, and only if it is not there in its popups. */
-  private async find(target: string): Promise<ReturnType<typeof matchTarget>> {
-    const inWindow = await this.elements('window').catch(() => [])
+  private async find(target: string, hwnd?: number): Promise<ReturnType<typeof matchTarget>> {
+    const inWindow = await this.elements('window', hwnd).catch(() => [])
     const match = matchTarget(inWindow, target)
     if (match.kind !== 'missing') return match
-    const inPopups = await this.elements('popups').catch(() => [])
+    const inPopups = await this.elements('popups', hwnd).catch(() => [])
     if (inPopups.length === 0) return match
     const second = matchTarget(inPopups, target)
     return second.kind === 'missing' ? matchTarget([...inWindow, ...inPopups], target) : second
@@ -442,14 +472,16 @@ export class Computer {
    * opened), so look again for a few seconds before giving up; an ambiguous
    * name fails at once, with the candidates, rather than clicking a guess.
    */
-  async locate(target: string, signal: AbortSignal, waitMs = TARGET_WAIT_MS): Promise<{ point: Point; element: UiElement }> {
+  async locate(target: string, signal: AbortSignal, waitMs = TARGET_WAIT_MS): Promise<{ point: Point; element: UiElement; window: WindowInfo }> {
     const started = Date.now()
     for (;;) {
       if (signal.aborted) throw new Error('Cancelled.')
-      const match = await this.find(target)
+      const window = await this.foreground()
+      if (!window) throw new Error('No foreground window for the named target.')
+      const match = await this.find(target, window.hwnd)
       if (match.kind === 'found') {
         const el = match.element
-        return { point: { x: Math.round(el.x + el.width / 2), y: Math.round(el.y + el.height / 2) }, element: el }
+        return { point: { x: Math.round(el.x + el.width / 2), y: Math.round(el.y + el.height / 2) }, element: el, window }
       }
       if (match.kind === 'ambiguous') {
         const list = await Promise.all(match.candidates.map(async el => {
@@ -469,13 +501,55 @@ export class Computer {
   }
 
   /** The point an action aims at: a named control, a coordinate, or nothing (the cursor). */
-  private async aim(input: ActionInput, call: CallContext): Promise<{ point: Point | undefined; label: string }> {
+  private async aim(input: ActionInput, call: CallContext): Promise<{ point: Point | undefined; label: string; named?: { window: WindowInfo; element: UiElement; point: Point } }> {
     if (typeof input.target === 'string' && input.target.trim() !== '') {
-      const { point, element } = await this.locate(input.target, call.signal)
-      return { point, label: ` on ${element.role} "${element.name.slice(0, 60)}"` }
+      const named = await this.locate(input.target, call.signal)
+      const { point, element } = named
+      return { point, named, label: ` on ${element.role} "${element.name.slice(0, 60)}"` }
     }
     if (input.coordinate) return { point: await this.point(input.coordinate), label: ` at (${input.coordinate.join(', ')})` }
     return { point: undefined, label: ' at the cursor' }
+  }
+
+  private async checkNamed(call: CallContext, win: WindowInfo): Promise<void> {
+    const current = await this.foreground()
+    if (current?.hwnd !== win.hwnd || current.pid !== win.pid) throw new Error('The named target window changed. Look again before acting.')
+    await this.assertAllowed(call, current, 'act on')
+  }
+
+  private async checkNamedPoint(call: CallContext, point: Point, window: WindowInfo, element: UiElement): Promise<WindowInfo> {
+    await this.checkNamed(call, window)
+    const hit = await this.windowAt(point)
+    if (!hit || hit.pid !== window.pid || hit.hwnd !== (element.windowHwnd ?? window.hwnd))
+      throw new Error('Another window covers the named target. Look again before acting.')
+    if (hit.hwnd !== window.hwnd && !isBrowser(window)) await this.assertAllowed(call, hit, 'click')
+    return hit
+  }
+
+  private async semanticAction(call: CallContext, named: { window: WindowInfo; element: UiElement; point: Point }, action: 'focus' | 'invoke'): Promise<boolean> {
+    const { window, element, point } = named
+    const hit = await this.checkNamedPoint(call, point, window, element)
+    if (!element.runtimeId || hit.hwnd !== window.hwnd) return false
+    if (call.signal.aborted) throw new Error('Cancelled.')
+    const result = await this.helper.call<{ performed: boolean }>('act', {
+      hwnd: window.hwnd, pid: window.pid, ...point, runtimeId: element.runtimeId, action,
+    }, 4000)
+    if (result?.performed === true) return true
+    if (result?.performed !== false) throw new Error('UI Automation did not confirm whether the action ran. Look again before retrying.')
+    return false
+  }
+
+  private async namedClickPoint(call: CallContext, target: string, named: { window: WindowInfo; element: UiElement; point: Point }): Promise<Point> {
+    if (!named.element.runtimeId) {
+      await this.checkNamedPoint(call, named.point, named.window, named.element)
+      return named.point
+    }
+    const live = await this.locate(target, call.signal, 0)
+    if (live.window.hwnd !== named.window.hwnd || live.window.pid !== named.window.pid
+      || live.element.runtimeId !== named.element.runtimeId || live.element.windowHwnd !== named.element.windowHwnd)
+      throw new Error('The named control changed. Look again before acting.')
+    await this.checkNamedPoint(call, live.point, live.window, live.element)
+    return live.point
   }
 
   /** wait with `until`: done as soon as the window or control is there (or gone). */
@@ -591,12 +665,18 @@ export class Computer {
         return { text: `Moved the mouse${label.replace(/^ (at|on)/, ' to')}.` }
       }
       case 'left_click': case 'right_click': case 'middle_click': case 'double_click': case 'triple_click': {
-        const { point: p, label } = await this.aim(input, call)
-        await this.checkPointer(call, p, 'click')
+        const { point, label, named } = await this.aim(input, call)
+        let p = point
+        if (!named) await this.checkPointer(call, p, 'click')
         const button = action === 'right_click' ? 'right' : action === 'middle_click' ? 'middle' : 'left'
         const count = action === 'double_click' ? 2 : action === 'triple_click' ? 3 : 1
         // Anthropic's schema passes click modifiers in `text`.
         const modifiers = parseModifiers(input.modifiers ?? input.text)
+        if (action === 'left_click' && named && modifiers.length === 0) {
+          const semantic = named.element.role === 'Edit' || named.element.editable ? 'focus' : 'invoke'
+          if (await this.semanticAction(call, named, semantic)) return { text: `${semantic === 'focus' ? 'Focused' : 'Invoked'}${label}.` }
+        }
+        if (named) p = await this.namedClickPoint(call, input.target!, named)
         await this.helper.call('click', { ...(p ?? {}), button, count, modifiers })
         return { text: `${action.replace('_', ' ')}${label}${modifiers.length ? ` holding ${input.modifiers ?? input.text}` : ''}.` }
       }
@@ -630,26 +710,30 @@ export class Computer {
         let into = ''
         if (input.target || input.coordinate) {
           // Click the field first: that is what gives it the keyboard.
-          const { point: p, label } = await this.aim(input, call)
-          await this.checkPointer(call, p, 'click')
-          await this.helper.call('click', { ...(p ?? {}), button: 'left', count: 1, modifiers: [] })
+          const { point, label, named } = await this.aim(input, call)
+          let p = point
+          const focused = named && await this.semanticAction(call, named, 'focus')
+          if (!focused) {
+            if (named) p = await this.namedClickPoint(call, input.target!, named)
+            else await this.checkPointer(call, p, 'click')
+            await this.helper.call('click', { ...(p ?? {}), button: 'left', count: 1, modifiers: [] })
+          }
           await sleep(120, undefined, { signal: call.signal })
-          into = ` (clicked${label} first)`
+          if (named) await this.checkNamed(call, named.window)
+          into = ` (${focused ? 'focused' : 'clicked'}${label} first)`
         }
         await this.checkKeyboard(call, 'type into')
         return { text: `${await this.enterText(text, call)}${into}` }
       }
       case 'key': {
         const combos = parseKeys(input.text ?? '')
-        await this.checkKeyboard(call, 'send keys to')
-        await this.helper.call('keys', { combos })
+        await this.sendKeys(call, combos)
         return { text: `Pressed ${input.text}.` }
       }
       case 'hold_key': {
         const combos = parseKeys(input.text ?? '')
         const seconds = Math.min(10, Math.max(0.05, input.duration ?? 0.5))
-        await this.checkKeyboard(call, 'send keys to')
-        await this.helper.call('keys', { combos, holdMs: Math.round(seconds * 1000) }, 20_000)
+        await this.sendKeys(call, combos, Math.round(seconds * 1000))
         return { text: `Held ${input.text} for ${seconds}s.` }
       }
     }

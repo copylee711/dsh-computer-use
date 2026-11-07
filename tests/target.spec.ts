@@ -62,6 +62,19 @@ describe('control targets', () => {
     expect(matchTarget(elements, 'id:X').kind).toBe('ambiguous')
   })
 
+  it('distinguishes long IDs and preserves literal names when no ID matches', () => {
+    const prefix = 'x'.repeat(140)
+    const elements = [
+      el('Button', '#general', 0, 0),
+      el('Button', 'id:literal', 300, 0),
+      el('Button', 'A', 0, 100, { automationId: prefix + 'a' }),
+      el('Button', 'B', 300, 100, { automationId: prefix + 'b' }),
+    ]
+    expect(matchTarget(elements, '#general')).toMatchObject({ kind: 'found', element: { name: '#general' } })
+    expect(matchTarget(elements, 'id:literal')).toMatchObject({ kind: 'found', element: { name: 'id:literal' } })
+    expect(matchTarget(elements, 'id:' + prefix + 'b')).toMatchObject({ kind: 'found', element: { name: 'B' } })
+  })
+
   it('suggests what is there when nothing matches', () => {
     const match = matchTarget([el('Button', '保存', 0, 0), el('Button', '取消', 100, 0), el('Text', '说明文字', 200, 0)], '另存')
     expect(match.kind).toBe('missing')

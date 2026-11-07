@@ -7,6 +7,7 @@
  * the DeepSeek Harness window can shrink into an always-on-top card.
  */
 import { isHostWindow } from './access.js'
+import { isBrowser, isHarnessAddress, readBrowserTab } from './browser-host.js'
 import type { HelperLike } from './helper-client.js'
 
 export interface CancellableAgent {
@@ -49,6 +50,7 @@ const KEEP_STEPS = 8
 const FINISH_HOLD_MS = 4000
 
 export interface OverlaySettings {
+  harnessUrl?: string | undefined
   overlay: boolean
   overlayLabel: string
   hostWindow: HostWindowMode
@@ -56,7 +58,7 @@ export interface OverlaySettings {
   userIdleMs: number
 }
 
-interface WindowRow { hwnd: number; exe: string; title: string; minimized: boolean; foreground?: boolean; x: number; y: number; width: number; height: number }
+interface WindowRow { hwnd: number; pid: number; exe: string; title: string; minimized: boolean; maximized?: boolean; foreground?: boolean; x: number; y: number; width: number; height: number }
 interface DisplayRow { x: number; y: number; width: number; height: number; workX: number; workY: number; workWidth: number; workHeight: number; primary: boolean; dpi: number }
 
 /**
@@ -95,7 +97,10 @@ export class OverlayController {
   private idleTimer: NodeJS.Timeout | undefined
   private unusedTimer: NodeJS.Timeout | undefined
   private otherTools = 0
-  private hostWindows: Array<{ hwnd: number; mode: 'card' | 'minimize' }> = []
+  private hostWindows: Array<{ hwnd: number; mode: 'card' | 'minimize'; maximized?: boolean | undefined }> = []
+  private returnTo: { window: WindowRow; web: boolean; tab?: string | undefined } | undefined
+  private ending: Promise<void> | undefined
+  private starting: Promise<void> | undefined
   private stopping = false
   /** Progress card lines: the reply as it streams, and what the agent is doing. */
   private streamAgent: unknown
@@ -173,6 +178,8 @@ export class OverlayController {
 
   /** Called before every action: shows the overlay once and updates its status line. */
   async begin(agent: CancellableAgent | undefined, status: string): Promise<void> {
+    await this.ending
+    await this.starting
     if (agent) this.agent = agent
     this.armIdle()
     this.armUnused()
@@ -180,25 +187,8 @@ export class OverlayController {
     if (!this.visible) {
       this.visible = true
       this.paused = false
-      await this.onStart?.().catch(error => this.log(`overlay start: ${String(error)}`))
-      await this.shrinkHost(settings.hostWindow)
-      const pet = settings.hostWindow === 'pet'
-      if (settings.overlay || pet) {
-        if (this.streamAgent !== agent) { this.text = ''; this.thinking = '' }
-        this.steps = status ? [status] : []
-        this.thinkingLatest = false
-        await this.helper.call('overlay_show', {
-          label: pet ? `${settings.overlayLabel || 'DeepSeek Harness'} 正在操控` : `${settings.overlayLabel || 'DeepSeek Harness'} 正在操控你的电脑`,
-          status,
-          icon: this.iconPath,
-          iconLight: this.iconPath.replace(/deepseek-white\.png$/, 'deepseek-black.png'),
-          idleMs: settings.userIdleMs,
-          glow: settings.overlay,
-          pet,
-          petOpacity: settings.cardOpacity,
-          text: this.text,
-        }).catch(error => this.log(`overlay: ${String(error)}`))
-      }
+      this.starting = this.start(agent, status, settings)
+      try { await this.starting } finally { this.starting = undefined }
       return
     }
     if (settings.hostWindow === 'pet' && !this.hostWindows.some(win => win.mode === 'card')) await this.cardIfShown()
@@ -207,6 +197,29 @@ export class OverlayController {
       await this.helper.call('card_opacity', { opacity: settings.cardOpacity }).catch(() => {})
     }
     await this.status(status)
+  }
+
+  private async start(agent: CancellableAgent | undefined, status: string, settings: OverlaySettings): Promise<void> {
+    await this.rememberHost(settings.harnessUrl).catch(error => this.log(`remember host: ${String(error)}`))
+    await this.onStart?.().catch(error => this.log(`overlay start: ${String(error)}`))
+    await this.shrinkHost(settings.hostWindow)
+    const pet = settings.hostWindow === 'pet'
+    if (settings.overlay || pet) {
+      if (this.streamAgent !== agent) { this.text = ''; this.thinking = '' }
+      this.steps = status ? [status] : []
+      this.thinkingLatest = false
+      await this.helper.call('overlay_show', {
+        label: pet ? `${settings.overlayLabel || 'DeepSeek Harness'} 正在操控` : `${settings.overlayLabel || 'DeepSeek Harness'} 正在操控你的电脑`,
+        status,
+        icon: this.iconPath,
+        iconLight: this.iconPath.replace(/deepseek-white\.png$/, 'deepseek-black.png'),
+        idleMs: settings.userIdleMs,
+        glow: settings.overlay,
+        pet,
+        petOpacity: settings.cardOpacity,
+        text: this.text,
+      }).catch(error => this.log(`overlay: ${String(error)}`))
+    }
   }
 
   async status(status: string): Promise<void> {
@@ -271,6 +284,7 @@ export class OverlayController {
 
   /** Agent finished (idle), was cancelled, or the plugin is stopping. */
   async end(agent?: CancellableAgent): Promise<void> {
+    if (this.starting) await this.starting
     if (agent !== undefined && this.agent !== undefined && agent !== this.agent) return
     if (this.idleTimer) clearTimeout(this.idleTimer)
     this.idleTimer = undefined
@@ -279,13 +293,50 @@ export class OverlayController {
     this.otherTools = 0
     this.agent = undefined
     this.paused = false
-    if (!this.visible) return
+    if (!this.visible) return this.ending
     this.visible = false
     if (this.pushTimer) { clearTimeout(this.pushTimer); this.pushTimer = undefined }
     // The progress card says "done" for a moment; a stop by the user hides at once.
-    if (this.settings().hostWindow === 'pet' && !this.stopping) await this.helper.call('pet_finish', { text: this.text, holdMs: FINISH_HOLD_MS }).catch(() => {})
-    else await this.helper.call('overlay_hide').catch(() => {})
-    await this.restoreHost()
+    this.ending = (async () => {
+      if (this.settings().hostWindow === 'pet' && !this.stopping) await this.helper.call('pet_finish', { text: this.text, holdMs: FINISH_HOLD_MS }).catch(() => {})
+      else await this.helper.call('overlay_hide').catch(() => {})
+      await this.restoreHost()
+      await this.focusRememberedHost().catch(error => this.log(`restore focus: ${String(error)}`))
+    })()
+    try { await this.ending } finally { this.ending = undefined }
+  }
+
+  isRememberedWebWindow(win: { hwnd: number; pid: number }): boolean {
+    const target = this.returnTo
+    return target?.web === true && target.window.hwnd === win.hwnd && target.window.pid === win.pid
+  }
+
+  private async rememberHost(harnessUrl: string | undefined): Promise<void> {
+    const foreground = await this.helper.call<WindowRow | null>('foreground')
+    if (foreground?.hwnd && isHostWindow(foreground)) {
+      this.returnTo = { window: foreground, web: false }
+      return
+    }
+    if (foreground?.hwnd && harnessUrl && isBrowser(foreground)) {
+      const state = await readBrowserTab(this.helper, foreground)
+      if (isHarnessAddress(state?.url, harnessUrl)) {
+        this.returnTo = { window: foreground, web: true, tab: state?.tab }
+        return
+      }
+    }
+    const rows = await this.helper.call<WindowRow[]>('windows')
+    const desktop = rows.filter(win => isHostWindow(win) && !win.minimized).sort((a, b) => b.width * b.height - a.width * a.height)[0]
+    if (desktop) this.returnTo = { window: desktop, web: false }
+  }
+
+  private async focusRememberedHost(): Promise<void> {
+    const target = this.returnTo
+    this.returnTo = undefined
+    if (!target) return
+    const { hwnd, pid } = target.window
+    const result = await this.helper.call<{ focused?: boolean }>('focus', { hwnd, pid }, 3000)
+    if (result?.focused && target.web && target.tab)
+      await this.helper.call('browser_tab', { hwnd, pid, select: target.tab }, 2500)
   }
 
   private stop(reason: string): void {
@@ -324,7 +375,7 @@ export class OverlayController {
       if (rows.length === 0) return
       if (mode === 'minimize' || mode === 'pet') {
         for (const row of rows) await this.helper.call('window_cmd', { hwnd: row.hwnd, op: 'minimize' })
-        this.hostWindows = rows.map(row => ({ hwnd: row.hwnd, mode: 'minimize' as const }))
+        this.hostWindows = rows.map(row => ({ hwnd: row.hwnd, mode: 'minimize' as const, maximized: row.maximized }))
         return
       }
       // The window the user is looking at (foreground), else the largest one.
@@ -374,7 +425,7 @@ export class OverlayController {
             .catch(() => {})
         }, 1200).unref()
       }
-      else await this.helper.call('window_cmd', { hwnd: win.hwnd, op: 'restore' }).catch(() => {})
+      else await this.helper.call('window_cmd', { hwnd: win.hwnd, op: win.maximized ? 'maximize' : 'restore' }).catch(() => {})
     }
   }
 }

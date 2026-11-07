@@ -18,6 +18,9 @@ export interface UiElement {
   focusable?: boolean
   /** True for web contenteditable composers (ProseMirror/tiptap/CodeMirror...). */
   editable?: boolean
+  /** Internal UIA identity used to verify a live named target before dispatch. */
+  runtimeId?: string
+  windowHwnd?: number
   x: number
   y: number
   width: number
@@ -56,10 +59,10 @@ const ROLES: Record<string, string[]> = {
 export function parseTarget(target: string): TargetQuery & { roles?: string[] } {
   const text = target.trim()
   if (text.startsWith('#') && text.length > 1) {
-    return { automationId: text.slice(1).trim(), name: '' }
+    return { automationId: text.slice(1).trim(), name: text }
   }
   const byId = /^(?:id|automationid|自动化id)\s*[:：]\s*(.+)$/i.exec(text)
-  if (byId) return { automationId: byId[1]!.trim(), name: '' }
+  if (byId) return { automationId: byId[1]!.trim(), name: text }
   const colon = text.search(/[:：]/)
   if (colon > 0) {
     const roles = ROLES[text.slice(0, colon).trim().toLowerCase().replace(/[\s_-]/g, '')]
@@ -101,7 +104,7 @@ export function matchTarget(elements: readonly UiElement[], target: string): Tar
       : elements.filter(el => (el.automationId ?? '').toLowerCase() === wantedId.toLowerCase())
     if (matches.length === 1) return { kind: 'found', element: matches[0]! }
     if (matches.length > 1) return { kind: 'ambiguous', candidates: matches.slice(0, 8) }
-    return { kind: 'missing', suggestions: [] }
+    // Existing controls can literally be named "#general" or "id:…".
   }
   const wanted = normalizeName(query.name)
   if (wanted === '') return { kind: 'missing', suggestions: [] }

@@ -288,10 +288,18 @@ namespace DshComputerUse
                 case "card_opacity": CardLayer.SetOpacity(Args.Int(r, "opacity", 100)); return null;
                 case "foreground": return Windows.Describe(Native.GetForegroundWindow());
                 case "window_at": return Windows.At(Args.Int(r, "x", 0), Args.Int(r, "y", 0));
-                case "focus": return Windows.Focus(new IntPtr(Convert.ToInt64(r["hwnd"])));
+                case "focus":
+                    var focusHwnd = new IntPtr(Convert.ToInt64(r["hwnd"]));
+                    uint focusPid;
+                    if (Args.Has(r, "pid") && (Native.GetWindowThreadProcessId(focusHwnd, out focusPid) == 0 || focusPid != Convert.ToUInt32(r["pid"])))
+                        throw new Exception("window no longer belongs to the original process");
+                    return Windows.Focus(focusHwnd);
                 case "window_cmd": return Windows.Command(new IntPtr(Convert.ToInt64(r["hwnd"])), Args.Str(r, "op", ""));
                 case "apps": return Apps.Search(Args.Str(r, "query", ""), Args.Int(r, "limit", 8));
                 case "launch": return Apps.Launch(r);
+                case "open_url": return Apps.OpenUrl(Args.Str(r, "url", ""));
+                case "browser_tab": return Uia.BrowserTab(r);
+                case "act": return Uia.Act(r);
                 case "clipboard_get": { var d = new Dictionary<string, object>(); d["text"] = Clip.Get(); return d; }
                 case "clipboard_set": if (Args.Bool(r, "agent", false)) Clip.AgentSet(Args.Str(r, "text", "")); else Clip.Set(Args.Str(r, "text", ""), false); return null;
                 case "clipboard_restore": { var d = new Dictionary<string, object>(); d["restored"] = Clip.RestoreAgent(); return d; }
@@ -1600,6 +1608,32 @@ namespace DshComputerUse
 
     internal static class Apps
     {
+        [DllImport("shlwapi.dll", CharSet = CharSet.Unicode)]
+        static extern int AssocQueryString(uint flags, uint str, string association, string verb, StringBuilder output, ref uint length);
+
+        public static object OpenUrl(string value)
+        {
+            Uri url;
+            if (!Uri.TryCreate(value, UriKind.Absolute, out url) || (url.Scheme != "http" && url.Scheme != "https"))
+                throw new Exception("Expected an HTTP(S) URL");
+            const uint executable = 2;
+            var path = new StringBuilder(32768);
+            uint length = (uint)path.Capacity;
+            if (AssocQueryString(0, executable, url.Scheme, "open", path, ref length) != 0)
+                throw new Exception("Could not resolve the default browser for " + url.Scheme);
+            string exe = Path.GetFileName(path.ToString()).ToLowerInvariant();
+            string flag;
+            switch (exe)
+            {
+                case "chrome.exe": case "msedge.exe": case "brave.exe": case "vivaldi.exe": case "chromium.exe":
+                    flag = "--new-window"; break;
+                case "firefox.exe": flag = "-new-window"; break;
+                default: throw new Exception("Cannot safely open a new window in the default browser (" + exe + ")");
+            }
+            string escapedUrl = url.AbsoluteUri.Replace("\"", "%22").Replace("\\", "%5C");
+            using (var process = Process.Start(new ProcessStartInfo(path.ToString(), flag + " \"" + escapedUrl + "\"") { UseShellExecute = false })) { }
+            return new Dictionary<string, object> { { "exe", exe } };
+        }
         static List<KeyValuePair<string, string>> cache;
         static DateTime cachedAt;
         static readonly object Gate = new object();
@@ -1741,6 +1775,128 @@ namespace DshComputerUse
         // than creating an unbounded number of stuck threads on repeated reads.
         static readonly SemaphoreSlim WindowCollectors = new SemaphoreSlim(4, 4);
 
+        static bool SameWindow(IntPtr hwnd, uint expectedPid)
+        {
+            uint pid;
+            return expectedPid != 0 && Native.GetWindowThreadProcessId(hwnd, out pid) != 0 && pid == expectedPid;
+        }
+
+        static bool IsActionWindow(IntPtr hwnd, uint pid, Native.POINT point)
+        {
+            if (!SameWindow(hwnd, pid) || Native.GetForegroundWindow() != hwnd) return false;
+            var hit = Windows.At(point.X, point.Y);
+            return hit.ContainsKey("hwnd") && Convert.ToInt64(hit["hwnd"]) == hwnd.ToInt64();
+        }
+
+        public static object Act(Dictionary<string, object> r)
+        {
+            var hwnd = new IntPtr(Convert.ToInt64(r["hwnd"]));
+            uint pid = Convert.ToUInt32(r["pid"]);
+            var point = new Native.POINT(Args.Int(r, "x", 0), Args.Int(r, "y", 0));
+            string runtimeId = Args.Str(r, "runtimeId", "");
+            string action = Args.Str(r, "action", "");
+            var result = new Dictionary<string, object> { { "performed", false } };
+            if (runtimeId.Length == 0 || !IsActionWindow(hwnd, pid, point))
+                throw new Exception("The named target window changed");
+
+            // FromPoint is scoped to the visible hit. Ancestors are searched only
+            // for the exact listed element; no action is attempted on a substitute.
+            var hit = AutomationElement.FromPoint(new System.Windows.Point(point.X, point.Y));
+            AutomationElement target = null;
+            for (var el = hit; el != null; el = TreeWalker.ControlViewWalker.GetParent(el))
+            {
+                if (String.Join(",", el.GetRuntimeId()) == runtimeId) { target = el; break; }
+                if (el.Current.ControlType == ControlType.Window) break;
+            }
+            if (target == null || target.Current.IsOffscreen || !target.Current.IsEnabled)
+                throw new Exception("The named target changed or is no longer actionable");
+            object pattern = null;
+            if (action == "invoke" && !target.TryGetCurrentPattern(InvokePattern.Pattern, out pattern)) return result;
+            if (action == "focus" && !target.Current.IsKeyboardFocusable) return result;
+            if (action != "invoke" && action != "focus") return result;
+            if (!IsActionWindow(hwnd, pid, point))
+                throw new Exception("The named target window changed");
+
+            // A provider error after dispatch is indeterminate. Let it surface
+            // rather than claiming the host can safely click again.
+            if (action == "invoke") ((InvokePattern)pattern).Invoke();
+            else
+            {
+                target.SetFocus();
+                for (int i = 0; i < 10 && !target.Current.HasKeyboardFocus; i++) Thread.Sleep(25);
+                if (!target.Current.HasKeyboardFocus) throw new Exception("Could not verify focus on the named control");
+            }
+            result["performed"] = true;
+            return result;
+        }
+
+        static bool BrowserChrome(AutomationElement element)
+        {
+            // Page content can supply arbitrary UIA names and IDs.
+            for (var parent = TreeWalker.ControlViewWalker.GetParent(element); parent != null; parent = TreeWalker.ControlViewWalker.GetParent(parent))
+            {
+                if (parent.Current.ControlType == ControlType.Document) return false;
+                if (parent.Current.ControlType == ControlType.Window) return true;
+            }
+            return false;
+        }
+
+        public static object BrowserTab(Dictionary<string, object> r)
+        {
+            IntPtr hwnd = new IntPtr(Convert.ToInt64(r["hwnd"]));
+            uint pid = Convert.ToUInt32(r["pid"]);
+            string select = Args.Str(r, "select", "");
+            if (!SameWindow(hwnd, pid) || !WindowCollectors.Wait(0)) return null;
+            var clock = Stopwatch.StartNew();
+            Dictionary<string, object> result = null;
+            var worker = new Thread(delegate ()
+            {
+                try
+                {
+                    var root = AutomationElement.FromHandle(hwnd);
+                    var controls = root.FindAll(TreeScope.Descendants, new OrCondition(
+                        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit),
+                        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TabItem)));
+                    var state = new Dictionary<string, object>();
+                    foreach (AutomationElement el in controls)
+                    {
+                        if (el.Current.IsOffscreen) continue;
+                        object pattern;
+                        if (el.Current.ControlType == ControlType.Edit)
+                        {
+                            string id = el.Current.AutomationId;
+                            string name = el.Current.Name;
+                            if (id != "view_1012" && id != "urlbar-input" && name != "Address and search bar" && name != "地址和搜索栏") continue;
+                            if (BrowserChrome(el) && el.TryGetCurrentPattern(ValuePattern.Pattern, out pattern))
+                                state["url"] = ((ValuePattern)pattern).Current.Value;
+                        }
+                        else if (el.TryGetCurrentPattern(SelectionItemPattern.Pattern, out pattern) && BrowserChrome(el))
+                        {
+                            var tab = (SelectionItemPattern)pattern;
+                            string id = String.Join(",", el.GetRuntimeId());
+                            if (select.Length > 0 && id == select)
+                            {
+                                if (clock.ElapsedMilliseconds < 1200 && SameWindow(hwnd, pid) && Native.GetForegroundWindow() == hwnd)
+                                {
+                                    if (!tab.Current.IsSelected) tab.Select();
+                                    state["selected"] = true;
+                                }
+                                break;
+                            }
+                            if (tab.Current.IsSelected) state["tab"] = id;
+                        }
+                    }
+                    result = state;
+                }
+                catch (Exception) { }
+                finally { WindowCollectors.Release(); }
+            });
+            worker.IsBackground = true;
+            worker.SetApartmentState(ApartmentState.MTA);
+            worker.Start();
+            return worker.Join(1250) ? result : null;
+        }
+
         static List<object> CollectWindow(IntPtr hwnd, int max, bool includeText)
         {
             IntPtr render = ChromiumRoot(hwnd);
@@ -1805,12 +1961,19 @@ namespace DshComputerUse
                     {
                         result = CollectWindow(hwnd, max, all);
                         if (result.Count < 4) { Thread.Sleep(400); result = CollectWindow(hwnd, max, all); } // Chromium builds its tree lazily
+                        foreach (Dictionary<string, object> item in result) item["windowHwnd"] = hwnd.ToInt64();
                     }
                     // An open menu or flyout is a window of its own, not a descendant of the one it belongs to.
                     if (popups || popupsOnly) foreach (var extra in Popups(hwnd))
                     {
                         if (result.Count >= max) break;
-                        try { result.AddRange(CollectWindow(extra, max - result.Count, all)); } catch (Exception) { }
+                        try
+                        {
+                            var popup = CollectWindow(extra, max - result.Count, all);
+                            foreach (Dictionary<string, object> item in popup) item["windowHwnd"] = extra.ToInt64();
+                            result.AddRange(popup);
+                        }
+                        catch (Exception) { }
                     }
                 }
                 catch (Exception ex) { error = ex; }
@@ -1949,6 +2112,7 @@ namespace DshComputerUse
             cache.Add(AutomationElement.BoundingRectangleProperty);
             cache.Add(AutomationElement.IsEnabledProperty);
             cache.Add(AutomationElement.AutomationIdProperty);
+            cache.Add(AutomationElement.RuntimeIdProperty);
             cache.Add(AutomationElement.ClassNameProperty);
             cache.Add(AutomationElement.IsKeyboardFocusableProperty);
             cache.Add(ValuePattern.ValueProperty);
@@ -1974,7 +2138,9 @@ namespace DshComputerUse
                 if (type == ControlType.Group) d["editable"] = true;
                 d["name"] = name.Length > 120 ? name.Substring(0, 120) + "…" : name;
                 string aid = (el.GetCachedPropertyValue(AutomationElement.AutomationIdProperty) as string) ?? "";
-                if (aid.Length > 0) d["automationId"] = aid.Length > 120 ? aid.Substring(0, 120) + "…" : aid;
+                if (aid.Length > 0) d["automationId"] = aid;
+                var runtimeId = el.GetCachedPropertyValue(AutomationElement.RuntimeIdProperty, true) as int[];
+                if (runtimeId != null && runtimeId.Length > 0) d["runtimeId"] = String.Join(",", runtimeId);
                 d["focusable"] = (bool)el.GetCachedPropertyValue(AutomationElement.IsKeyboardFocusableProperty);
                 object value = el.GetCachedPropertyValue(ValuePattern.ValueProperty, true);
                 if (value is string && ((string)value).Length > 0) { var v = (string)value; d["value"] = v.Length > 120 ? v.Substring(0, 120) + "…" : v; }

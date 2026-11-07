@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { basename, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { HelperClient } from '../lib/types/helper-client.js'
@@ -14,10 +14,11 @@ mkdirSync(root, { recursive: true })
 const title = `DSH UIA acceptance ${Date.now()}`
 const page = resolve(root, 'index.html')
 writeFileSync(page, `<!doctype html><meta charset="utf-8"><title>${title}</title>
-<button>UIA fixture button</button><input aria-label="UIA fixture input">
+<button onclick="this.textContent='UIA fixture invoked'">UIA fixture button</button><input aria-label="UIA fixture input">
 <div role="group" class="ProseMirror" contenteditable="true" aria-label="UIA fixture composer" style="width:400px;height:100px;border:1px solid">Composer</div>
 <div role="group" aria-label="UIA ordinary group" style="width:400px;height:50px">Ordinary group</div>`)
-const chrome = spawn(process.argv[2] ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe', [
+const browserPath = process.argv[2] ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe'
+const chrome = spawn(browserPath, [
   `--user-data-dir=${resolve(root, 'profile')}`, '--no-first-run', '--no-default-browser-check', pathToFileURL(page).href,
 ], { windowsHide: true, stdio: 'ignore' })
 let launchError
@@ -28,11 +29,14 @@ try {
   for (let i = 0; i < 60; i++) {
     if (launchError) throw launchError
     const windows = await helper.call('windows')
-    hwnd = windows.find(w => w.exe === 'chrome.exe' && w.title.includes(title))?.hwnd
+    hwnd = windows.find(w => w.exe.toLowerCase() === basename(browserPath).toLowerCase() && w.title.includes(title))?.hwnd
     if (hwnd) break
     await sleep(250)
   }
   assert.ok(hwnd, 'scratch Chrome window must open')
+  const win = (await helper.call('windows')).find(w => w.hwnd === hwnd)
+  const identity = { hwnd, pid: win.pid }
+  assert.ok((await helper.call('focus', identity)).focused, 'focus the scratch browser')
   const start = Date.now()
   // A title can arrive before the renderer's accessibility tree is ready.
   let elements = []
@@ -52,11 +56,47 @@ try {
   assert.equal(editor.element.editable, true, 'editor Group is marked editable')
   assert.equal(editor.element.focusable, true)
   assert.ok(!elements.some(e => e.name === 'UIA ordinary group'), 'skip ordinary Groups')
-  const keys = elements.map(e => JSON.stringify([e.role, e.name, e.x, e.y, e.width, e.height]))
+  const keys = elements.filter(e => e.windowHwnd === hwnd).map(e => JSON.stringify([e.role, e.name, e.x, e.y, e.width, e.height]))
   assert.equal(new Set(keys).size, keys.length, 'window and renderer controls are deduplicated')
   const limited = await helper.call('ui', { hwnd, maxNodes: 10 })
   assert.ok(limited.elements.length <= 10, 'respect maxNodes after supplementing')
+  const original = await helper.call('browser_tab', identity)
+  assert.ok(original.url.endsWith('/index.html') && original.tab, 'read the browser address and active tab')
+  const act = async (name, action) => {
+    // First-run browser UI can take focus while the fixture loads.
+    for (let i = 0; i < 15; i++) {
+      const live = await helper.call('ui', { hwnd, maxNodes: 100 })
+      const el = live.elements.find(e => e.name === name)
+      if (el?.runtimeId) {
+        const point = { x: Math.round(el.x + el.width / 2), y: Math.round(el.y + el.height / 2) }
+        const hit = await helper.call('window_at', point)
+        const foreground = await helper.call('foreground')
+        if (hit?.hwnd === hwnd && foreground?.hwnd === hwnd)
+          return helper.call('act', { ...identity, ...point, action, runtimeId: el.runtimeId })
+      }
+      await sleep(150)
+    }
+    throw new Error(`Scratch control ${name} was not actionable in the foreground window`)
+  }
+  assert.ok((await act('UIA fixture button', 'invoke')).performed, 'invoke the exact named button')
+  assert.ok((await act('UIA fixture input', 'focus')).performed, 'focus the exact named field')
+  const afterInvoke = await helper.call('ui', { hwnd, maxNodes: 100 })
+  assert.ok(afterInvoke.elements.some(e => e.name === 'UIA fixture invoked'), 'the button action ran')
+  assert.equal((await helper.call('foreground')).hwnd, hwnd, 'only send keys to the scratch browser')
+  await helper.call('keys', { combos: [[0x11, 0x54]] }) // Ctrl+T in the scratch window
+  let other
+  for (let i = 0; i < 15; i++) {
+    other = await helper.call('browser_tab', identity)
+    if (other?.tab && other.tab !== original.tab) break
+    await sleep(100)
+  }
+  assert.ok(other?.tab && other.tab !== original.tab, 'a different scratch tab became active')
+  assert.ok((await helper.call('browser_tab', { ...identity, select: original.tab })).selected)
+  const restored = await helper.call('browser_tab', identity)
+  assert.equal(restored.tab, original.tab, 'restore the exact saved tab')
+  assert.equal(restored.url, original.url, 'preserve the saved tab URL')
   console.log(`PASS: browser chrome, page controls, editable Group, input targeting, metadata, deduplication and maxNodes (${elements.length} elements, ${Date.now() - start} ms)`)
+  console.log('PASS: exact UIA Invoke and SetFocus, browser address read and saved tab restoration')
 } finally {
   try { if (hwnd) await helper.call('window_cmd', { hwnd, op: 'close' }) }
   finally { helper.dispose() }

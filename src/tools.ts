@@ -248,6 +248,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       await computer.overlay.yieldToUser(call.signal, false)
       const before = await computer.foreground()
       let how: string
+      let openedUrlWindow: WindowInfo | undefined
       const isUri = isUrl || /^[a-z][a-z0-9+.-]+:(?![\/])/i.test(name)
       const running = isUri || newInstance ? undefined : (await computer.windows()).find(win => !isHostWindow(win) && appMatches(name, win))
       // Closed to the system tray (QQ, 微信...): click its tray icon like the user
@@ -265,14 +266,24 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       } else {
         const apps = isUri ? [] : await computer.helper.call<Array<{ name: string; id: string }>>('apps', { query: name, limit: 5 }, 30_000)
         const app = apps[0]
+        const existing = isUrl ? new Set((await computer.windows()).map(win => win.hwnd)) : undefined
+        const browser = isUrl ? await computer.helper.call<{ exe: string }>('open_url', { url: name }) : undefined
         if (app) await computer.helper.call('launch', { appId: app.id })
-        else await computer.helper.call('launch', { target: name })
-        how = app ? `Launched "${app.name}".` : isUrl ? `Opened ${name} in the default browser.` : `Started "${name}".`
+        else if (!isUrl) await computer.helper.call('launch', { target: name })
+        how = app ? `Launched "${app.name}".` : isUrl ? `Requested a new browser window for ${name}.` : `Started "${name}".`
         // Wait for the new window to take the foreground. Explorer's desktop and
         // taskbar do not count, but a File Explorer window (CabinetWClass) does.
         for (let i = 0; i < 80; i++) {
           await sleep(100, undefined, { signal: call.signal })
           const now = await computer.foreground()
+          if (browser) {
+            if (now?.exe.toLowerCase() === browser.exe && !existing!.has(now.hwnd)) {
+              openedUrlWindow = now
+              how = `Opened ${name} in a new browser window.`
+              break
+            }
+            continue
+          }
           if (now && now.hwnd !== before?.hwnd && !isHostWindow(now) && !isTransientShell(now) && (now.exe.toLowerCase() !== 'explorer.exe' || now.className === 'CabinetWClass')) break
           // The app's window is up but something transient (the IME bar) holds the foreground: bring it forward.
           if (i >= 10 && i % 10 === 0 && !isUri) {
@@ -283,7 +294,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       }
       const fg = await computer.foreground()
       // The user approved this app by name; remember which executable it turned out to be.
-      if (fg && !isHostWindow(fg) && settings.accessMode === 'per-app' && (computer.access.missing(call.session, [appName]).length === 0 || isUrl)) {
+      if (fg && !isHostWindow(fg) && settings.accessMode === 'per-app' && (isUrl ? openedUrlWindow?.hwnd === fg.hwnd && openedUrlWindow.pid === fg.pid : computer.access.missing(call.session, [appName]).length === 0)) {
         computer.access.grant(call.session, [fg.exe])
       }
       return `${how} ${await computer.describeForeground()}${skillNote(call.session, name, fg)}`
@@ -359,6 +370,10 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       if (denial && action !== 'minimize') throw new Error(denial)
       await computer.overlay.begin(call.agent, `窗口 ${action}`)
       await computer.overlay.yieldToUser(call.signal, false)
+      if (action === 'close') {
+        if (computer.overlay.isRememberedWebWindow(target)) throw new Error('This window contains the protected DeepSeek Harness Web tab.')
+        await computer.assertAllowed(call, target, 'close')
+      }
       let text: string
       if (action === 'focus') {
         const result = await computer.focus(target)

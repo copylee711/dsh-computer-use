@@ -4,6 +4,7 @@
  * browser bundle stays small.
  */
 import type { Settings } from './computer.js'
+import { httpOrigin } from './browser-host.js'
 
 /** The Loader entry id (settings namespace); see cordis.patch.yml. */
 export const ENTRY_ID = 'copylee-computer-use'
@@ -43,6 +44,7 @@ export function resolveConfig(raw: unknown): Settings {
   }
   const bool = (key: 'overlay' | 'autoScreenshot' | 'pauseOnUserInput' | 'quickSteps' | 'nativeHelper'): boolean => typeof out[key] === 'boolean' ? out[key] : DEFAULTS[key]
   return {
+    harnessUrl: typeof out.harnessUrl === 'string' ? httpOrigin(out.harnessUrl.trim()) : undefined,
     accessMode: out.accessMode === 'allow-all' || out.accessMode === 'per-app' ? out.accessMode : DEFAULTS.accessMode,
     overlay: bool('overlay'),
     overlayLabel: typeof out.overlayLabel === 'string' && out.overlayLabel.trim() !== '' ? out.overlayLabel.trim().slice(0, 40) : DEFAULTS.overlayLabel,

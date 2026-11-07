@@ -31,6 +31,7 @@ export const name = '@copylee/dsh-computer-use'
 export const inject = ['tools', 'attachments']
 
 export interface Config {
+  harnessUrl?: string
   accessMode?: AccessMode
   overlay?: boolean
   overlayLabel?: string
@@ -53,6 +54,10 @@ export interface Config {
 
 
 export const Config: z<Config> = z.object({
+  harnessUrl: z.string().default('').volatile().i18n({
+    'zh-CN': { $description: 'DSH Web GUI 地址。留空时使用本地 Web 服务端口。反代或自定义域名请填写实际访问地址。' },
+    'en-US': { $description: 'DSH Web GUI URL. Leave blank to use the local Web server port. Set the actual URL when using a reverse proxy or custom domain.' },
+  }),
   accessMode: z.union([
     z.const('per-app').i18n({ 'zh-CN': { $description: '按应用授权（每个会话由你批准要操控的应用）' }, 'en-US': { $description: 'Per app (approve the apps each session)' } }),
     z.const('allow-all').i18n({ 'zh-CN': { $description: '全部允许（不弹审批）' }, 'en-US': { $description: 'Allow all apps (no approval)' } }),
@@ -145,7 +150,12 @@ export function apply(ctx: Context, config: Config = {}): void {
     ctx.logger.warn('dsh-computer-use only supports Windows; no tools registered.')
     return
   }
-  const settings = (): Settings => resolveConfig(config)
+  const settings = (): Settings => {
+    const resolved = resolveConfig(config)
+    const port = ctx.get('webServer')?.port
+    if (!resolved.harnessUrl && port) resolved.harnessUrl = `http://127.0.0.1:${port}`
+    return resolved
+  }
   const log = (message: string): void => ctx.logger.info(message)
   // Commands that koffi can take run in-process (no exe for Smart App Control to refuse); the rest go to the C# helper.
   const helper = new NativeHelper(new HelperClient(message => ctx.logger.warn(message)), message => ctx.logger.warn(message), () => settings().nativeHelper)

@@ -20,6 +20,9 @@ class FakeHelper implements HelperLike {
   calls: Array<{ cmd: string; args: Record<string, unknown> }> = []
   foreground = CHROME
   failOn = ''
+  hit?: typeof CHROME
+  tab: { url?: string; tab?: string } | null = null
+  acted = false
   /** UI Automation elements the window reports; a function lets a test change them between looks. */
   elements: unknown[] | (() => unknown[]) = []
   windowText = { text: '', length: 0, truncated: false, source: 'none' }
@@ -32,7 +35,10 @@ class FakeHelper implements HelperLike {
       displays: [{ x: 0, y: 0, width: 2560, height: 1600, primary: true, dpi: 192, name: 'D1' }],
       screenshot: { data: Buffer.from('jpeg').toString('base64'), width: args.outWidth, height: args.outHeight },
       foreground: this.foreground,
-      window_at: this.foreground,
+      window_at: this.hit ?? this.foreground,
+      browser_tab: this.tab,
+      act: { performed: this.acted },
+      focus: { focused: true },
       windows: [CHROME, HOST],
       cursor: { x: 10, y: 10 },
       text: { ...this.foreground, ...this.windowText },
@@ -47,10 +53,10 @@ class FakeHelper implements HelperLike {
   dispose(): void {}
 }
 
-function setup(options: { vision?: boolean; mode?: Settings['accessMode']; typing?: Settings['typingMode']; skills?: SkillStore; autoApprove?: boolean } = {}) {
+function setup(options: { vision?: boolean; mode?: Settings['accessMode']; typing?: Settings['typingMode']; skills?: SkillStore; autoApprove?: boolean; harnessUrl?: string } = {}) {
   const helper = new FakeHelper()
   const access = new AccessControl()
-  const settings = { ...SETTINGS, accessMode: options.mode ?? 'per-app', typingMode: options.typing ?? SETTINGS.typingMode }
+  const settings = { ...SETTINGS, accessMode: options.mode ?? 'per-app', typingMode: options.typing ?? SETTINGS.typingMode, harnessUrl: options.harnessUrl }
   const overlay = new OverlayController(helper, () => settings, () => {})
   const computer = new Computer(helper, access, overlay, () => settings)
   const saved: number[] = []
@@ -68,8 +74,92 @@ function setup(options: { vision?: boolean; mode?: Settings['accessMode']; typin
   const tool = (name: string) => tools.find(t => t.name === name)!
   const run = (name: string, args: unknown) => tool(name).execute(args, {} as never) as Promise<{ text: string; image?: { attachmentId: string } }>
   const render = (name: string, value: unknown) => tool(name).output.render({}, value as never)
-  return { helper, access, run, render, saved, cancelled: () => cancelled }
+  return { helper, overlay, access, run, render, saved, cancelled: () => cancelled }
 }
+
+describe('browser host and semantic actions', () => {
+  const target = { role: 'Button', name: 'Open', runtimeId: '42,1,2', x: 100, y: 100, width: 100, height: 40 }
+  const click = (t: ReturnType<typeof setup>) => t.run('computer_batch', { actions: [{ action: 'left_click', target: 'Open' }] })
+
+  it('invokes the identified control once and only clicks when the helper confirms it did not dispatch', async () => {
+    const t = setup({ mode: 'allow-all' })
+    t.helper.elements = [target]
+    t.helper.acted = true
+    await click(t)
+    expect(t.helper.calls.find(c => c.cmd === 'act')?.args).toMatchObject({ hwnd: CHROME.hwnd, pid: CHROME.pid, runtimeId: target.runtimeId })
+    expect(t.helper.calls.some(c => c.cmd === 'click')).toBe(false)
+    t.helper.acted = false
+    await click(t)
+    expect(t.helper.calls.filter(c => c.cmd === 'click')).toHaveLength(1)
+    t.helper.failOn = 'act'
+    expect((await click(t)).text).toContain('act broke')
+    expect(t.helper.calls.filter(c => c.cmd === 'click')).toHaveLength(1)
+  })
+
+  it('rejects a covered named target before either input path', async () => {
+    const t = setup({ mode: 'allow-all' })
+    t.helper.elements = [target]
+    t.helper.hit = { ...CHROME, hwnd: 32, pid: 92, exe: 'notepad.exe' }
+    expect((await click(t)).text).toContain('covers the named target')
+    expect(t.helper.calls.some(c => c.cmd === 'act' || c.cmd === 'click')).toBe(false)
+  })
+
+  it('blocks input on the Web host and restores its saved tab after control', async () => {
+    const t = setup({ mode: 'allow-all', harnessUrl: 'http://127.0.0.1:3080' })
+    t.helper.tab = { url: 'localhost:3080/chat', tab: 'host-tab' }
+    await expect(t.run('computer', { action: 'key', text: 'ctrl+l' })).rejects.toThrow(/Web tab is protected/)
+    expect(t.helper.calls.some(c => c.cmd === 'keys')).toBe(false)
+    t.helper.foreground = { ...CHROME, hwnd: 42 }
+    t.helper.tab = { url: '', tab: 'different-tab' }
+    await t.run('computer', { action: 'key', text: 'ctrl+l' })
+    await t.overlay.end()
+    expect(t.helper.calls.find(c => c.cmd === 'focus')?.args).toMatchObject({ hwnd: CHROME.hwnd, pid: CHROME.pid })
+    expect(t.helper.calls.find(c => c.cmd === 'browser_tab' && c.args.select)?.args.select).toBe('host-tab')
+  })
+
+  it('returns focus to the desktop host even in keep mode', async () => {
+    const t = setup()
+    t.helper.foreground = HOST
+    await t.overlay.begin(undefined, '')
+    t.helper.foreground = CHROME
+    await t.overlay.end()
+    expect(t.helper.calls.find(c => c.cmd === 'focus')?.args.hwnd).toBe(HOST.hwnd)
+  })
+
+  it('leaves the browser untouched if the active tab cannot be verified', async () => {
+    const t = setup({ mode: 'allow-all', harnessUrl: 'http://127.0.0.1:3080' })
+    await expect(t.run('computer', { action: 'key', text: 'ctrl+l' })).rejects.toThrow(/Could not verify the active browser tab/)
+    expect(t.helper.calls.some(c => c.cmd === 'keys')).toBe(false)
+  })
+
+  it('rechecks the active browser tab before sending the next key chord', async () => {
+    const t = setup({ mode: 'allow-all', harnessUrl: 'http://127.0.0.1:3080' })
+    t.helper.tab = { url: 'https://example.com', tab: 'ordinary' }
+    const original = t.helper.call.bind(t.helper)
+    t.helper.call = async <T>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
+      const result = await original<T>(cmd, args)
+      if (cmd === 'keys') t.helper.tab = { url: '127.0.0.1:3080', tab: 'host' }
+      return result
+    }
+    await expect(t.run('computer', { action: 'key', text: 'ctrl+tab ctrl+w' })).rejects.toThrow(/Web tab is protected/)
+    expect(t.helper.calls.filter(c => c.cmd === 'keys')).toHaveLength(1)
+  })
+
+  it('uses the new-window URL route and grants only the observed new browser', async () => {
+    const t = setup()
+    const original = t.helper.call.bind(t.helper)
+    t.helper.call = async <T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> => {
+      if (cmd !== 'open_url') return original<T>(cmd, args)
+      t.helper.calls.push({ cmd, args })
+      t.helper.foreground = { ...CHROME, hwnd: 33 }
+      return { exe: CHROME.exe } as T
+    }
+    await t.run('open_application', { name: 'https://example.com/' })
+    expect(t.helper.calls.find(c => c.cmd === 'open_url')?.args.url).toBe('https://example.com/')
+    expect(t.helper.calls.some(c => c.cmd === 'launch')).toBe(false)
+    expect(t.access.isGranted('s1', CHROME)).toBe(true)
+  })
+})
 
 describe('computer tool', () => {
   it('converts screenshot coordinates to physical pixels and returns a fresh screenshot', async () => {

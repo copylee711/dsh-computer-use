@@ -29,6 +29,7 @@ dsh plugin --profile web add @copylee/dsh-computer-use@latest
 | 工具提示未获授权 | 在会话中批准目标应用。检查它是否在禁用列表中。 |
 | 模型说看不到按钮或输入框 | 将目标窗口置于前台，再读取控件。画布、游戏和部分自绘应用可能只适合截图定位。 |
 | Web GUI 无法恢复焦点 | 从 Web GUI 活动标签发起任务。如果走反代或自定义域名，请设置 [`harnessUrl`](settings.md#web-gui-地址)。恢复标签依赖浏览器提供的 UI Automation 信息。 |
-| 默认浏览器无法显式新开窗口 | 使用 Chrome、Edge、Brave、Vivaldi、Chromium 或 Firefox 等支持独立窗口启动参数的浏览器。 |
+| 希望沿用当前 Chrome | 可以说“用当前打开的 Chrome，在同一窗口的新标签打开这个网址”。窗口和活动标签必须能通过 UI Automation 核验。 |
+| 默认浏览器无法显式新开窗口 | 当没有可复用窗口时，使用 Chrome、Edge、Brave、Vivaldi、Chromium 或 Firefox 等支持独立窗口启动参数的默认浏览器。 |
 | 截图或输入异常 | 关闭 **进程内截图与输入**，让辅助程序接管。开启 Smart App Control 时，辅助程序可在系统 PowerShell 中加载。 |
 | 管理员窗口、UAC 或锁屏无法操作 | 由用户直接处理。系统限制普通权限进程对这些窗口的操作。 |

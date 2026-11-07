@@ -376,7 +376,7 @@ function ComputerUseSection({ ctx }: { ctx: ClientContext }) {
             options: [{ value: 'pet', label: '迷你进度卡片（推荐）' }, { value: 'card', label: '缩成右下角置顶悬浮卡片' }, { value: 'minimize', label: '最小化' }, { value: 'keep', label: '保持不变' }],
             onChange: (value: string) => edit('hostWindow', value as Settings['hostWindow']),
           }),
-          h('span', { style: { ...S.hint, fontWeight: 400 } }, draft.hostWindow === 'pet' ? 'DSH 最小化，右下角显示迷你卡片：一行滚动显示回复正文，一行显示思考和工具调用；可拖动，有暂停 / 停止按钮。结束后自动恢复。' : '操控结束后自动恢复原尺寸和位置。'),
+          h('span', { style: { ...S.hint, fontWeight: 400 } }, draft.hostWindow === 'pet' ? '卡片上方显示思考，下方显示操作。可拖动、暂停或停止。正文开始输出时，回到 DSH 对话。' : '操控结束或正文开始输出时，恢复 DSH 窗口。'),
         ),
         h('div', { style: S.label },
           '悬浮卡片透明度',

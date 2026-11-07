@@ -299,6 +299,7 @@ namespace DshComputerUse
                 case "launch": return Apps.Launch(r);
                 case "open_url": return Apps.OpenUrl(Args.Str(r, "url", ""));
                 case "browser_tab": return Uia.BrowserTab(r);
+                case "browser_open_tab": return Uia.OpenBrowserTab(r);
                 case "act": return Uia.Act(r);
                 case "clipboard_get": { var d = new Dictionary<string, object>(); d["text"] = Clip.Get(); return d; }
                 case "clipboard_set": if (Args.Bool(r, "agent", false)) Clip.AgentSet(Args.Str(r, "text", "")); else Clip.Set(Args.Str(r, "text", ""), false); return null;
@@ -310,8 +311,8 @@ namespace DshComputerUse
                 case "window_card": CardLayer.SetOpacity(Args.Int(r, "opacity", 100)); return Windows.Card(new IntPtr(Convert.ToInt64(r["hwnd"])), Args.Int(r, "x", 0), Args.Int(r, "y", 0), Args.Int(r, "width", 0), Args.Int(r, "height", 0));
                 case "window_uncard": return Windows.Uncard(new IntPtr(Convert.ToInt64(r["hwnd"])));
                 case "overlay_status": Overlay.Status(Args.Str(r, "status", "")); return null;
-                case "pet_update": Overlay.PetUpdate(Args.Str(r, "text", ""), Args.Str(r, "thinking", ""), Args.Strs(r, "steps"), Args.Bool(r, "thinkingLatest", false)); return null;
-                case "pet_finish": Overlay.Finish(Args.Str(r, "text", ""), Args.Int(r, "holdMs", 4000)); return null;
+                case "pet_update": Overlay.PetUpdate(Args.Str(r, "thinking", ""), Args.Strs(r, "steps")); return null;
+                case "pet_finish": Overlay.Finish(Args.Int(r, "holdMs", 4000)); return null;
                 case "overlay_hide": Overlay.Hide(); return null;
                 default: throw new Exception("unknown command: " + cmd);
             }
@@ -1841,6 +1842,85 @@ namespace DshComputerUse
             return false;
         }
 
+        static bool BrowserContentFocused()
+        {
+            for (var el = AutomationElement.FocusedElement; el != null; el = TreeWalker.ControlViewWalker.GetParent(el))
+            {
+                if (el.Current.ControlType == ControlType.Document) return true;
+                if (el.Current.ControlType == ControlType.Window) return false;
+            }
+            return false;
+        }
+
+        public static object OpenBrowserTab(Dictionary<string, object> r)
+        {
+            var hwnd = new IntPtr(Convert.ToInt64(r["hwnd"]));
+            uint pid = Convert.ToUInt32(r["pid"]);
+            string expected = Args.Str(r, "tab", "");
+            Uri url;
+            if (!Uri.TryCreate(Args.Str(r, "url", ""), UriKind.Absolute, out url) || (url.Scheme != "http" && url.Scheme != "https"))
+                throw new Exception("Expected an HTTP(S) URL");
+            Func<bool> current = delegate { return SameWindow(hwnd, pid) && Native.GetForegroundWindow() == hwnd; };
+            Func<Dictionary<string, object>> read = delegate { return BrowserTab(r) as Dictionary<string, object>; };
+            var initial = new Dictionary<string, object>(r) { { "listTabs", true } };
+            var before = current() ? BrowserTab(initial) as Dictionary<string, object> : null;
+            object tabIds;
+            if (expected.Length == 0 || before == null || Args.Str(before, "tab", "") != expected || !current())
+                throw new Exception("The browser window or active tab changed before opening a new tab");
+            if (!before.TryGetValue("tabs", out tabIds) || !(tabIds is List<string>))
+                throw new Exception("Could not verify the browser's existing tabs");
+            var existing = new HashSet<string>((List<string>)tabIds);
+            if (!existing.Contains(expected)) throw new Exception("The active browser tab could not be verified");
+
+            Input.Keys(new Dictionary<string, object> { { "combos", new[] { new[] { 0x11, 0x54 } } } });
+            var clock = Stopwatch.StartNew();
+            string created = "";
+            while (clock.ElapsedMilliseconds < 2400 && current())
+            {
+                var fresh = read();
+                if (fresh != null && !existing.Contains(Args.Str(fresh, "tab", ""))
+                    && Args.Str(fresh, "url", "unavailable") == "")
+                {
+                    created = Args.Str(fresh, "tab", "");
+                    if (created.Length > 0) break;
+                }
+                Thread.Sleep(65);
+            }
+            if (created.Length == 0 || !current())
+                throw new Exception("Could not confirm a new blank tab in the original browser window");
+            Input.Keys(new Dictionary<string, object> { { "combos", new[] { new[] { 0x11, 0x4C } } } });
+            clock.Restart();
+            bool addressReady = false;
+            while (clock.ElapsedMilliseconds < 1200 && current())
+            {
+                var blank = read();
+                if (blank != null)
+                {
+                    if (Args.Str(blank, "tab", "") != created || Args.Str(blank, "url", "unavailable") != "") break;
+                    if (Args.Bool(blank, "addressFocused", false)) { addressReady = true; break; }
+                }
+                Thread.Sleep(65);
+            }
+            if (!addressReady || !current()) throw new Exception("Could not verify focus in the new tab's address bar");
+            Input.Paste(url.AbsoluteUri, true, 120);
+            clock.Restart();
+            while (clock.ElapsedMilliseconds < 1200 && current())
+            {
+                var address = read();
+                if (address != null)
+                {
+                    if (Args.Str(address, "tab", "") != created || !Args.Bool(address, "addressFocused", false)) break;
+                    if (Args.Str(address, "url", "") == url.AbsoluteUri && current())
+                    {
+                        Input.Keys(new Dictionary<string, object> { { "combos", new[] { new[] { 0x0D } } } });
+                        return new Dictionary<string, object> { { "tab", created } };
+                    }
+                }
+                Thread.Sleep(65);
+            }
+            throw new Exception("Could not verify the new tab's address before navigation");
+        }
+
         public static object BrowserTab(Dictionary<string, object> r)
         {
             IntPtr hwnd = new IntPtr(Convert.ToInt64(r["hwnd"]));
@@ -1858,9 +1938,10 @@ namespace DshComputerUse
                         new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit),
                         new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TabItem)));
                     var state = new Dictionary<string, object>();
+                    var tabs = Args.Bool(r, "listTabs", false) ? new List<string>() : null;
                     foreach (AutomationElement el in controls)
                     {
-                        if (el.Current.IsOffscreen) continue;
+                        if (el.Current.IsOffscreen && (tabs == null || el.Current.ControlType != ControlType.TabItem)) continue;
                         object pattern;
                         if (el.Current.ControlType == ControlType.Edit)
                         {
@@ -1868,12 +1949,16 @@ namespace DshComputerUse
                             string name = el.Current.Name;
                             if (id != "view_1012" && id != "urlbar-input" && name != "Address and search bar" && name != "地址和搜索栏") continue;
                             if (BrowserChrome(el) && el.TryGetCurrentPattern(ValuePattern.Pattern, out pattern))
+                            {
                                 state["url"] = ((ValuePattern)pattern).Current.Value;
+                                state["addressFocused"] = el.Current.HasKeyboardFocus;
+                            }
                         }
                         else if (el.TryGetCurrentPattern(SelectionItemPattern.Pattern, out pattern) && BrowserChrome(el))
                         {
                             var tab = (SelectionItemPattern)pattern;
                             string id = String.Join(",", el.GetRuntimeId());
+                            if (tabs != null) tabs.Add(id);
                             if (select.Length > 0 && id == select)
                             {
                                 if (clock.ElapsedMilliseconds < 1200 && SameWindow(hwnd, pid) && Native.GetForegroundWindow() == hwnd)
@@ -1885,6 +1970,17 @@ namespace DshComputerUse
                             }
                             if (tab.Current.IsSelected) state["tab"] = id;
                         }
+                    }
+                    if (tabs != null) state["tabs"] = tabs;
+                    if (Args.Bool(r, "details", false) && Native.GetForegroundWindow() == hwnd)
+                    {
+                        var render = ChromiumRoot(hwnd);
+                        Native.RECT rect;
+                        if (render != hwnd && Native.GetWindowRect(render, out rect) && rect.Right > rect.Left && rect.Bottom > rect.Top)
+                            state["content"] = new Dictionary<string, object> {
+                                { "x", rect.Left }, { "y", rect.Top }, { "width", rect.Right - rect.Left }, { "height", rect.Bottom - rect.Top },
+                            };
+                        state["contentFocused"] = BrowserContentFocused();
                     }
                     result = state;
                 }
@@ -2314,9 +2410,8 @@ namespace DshComputerUse
         static bool petMode;
         static LayeredForm pet;
         public static volatile IntPtr PetHwnd = IntPtr.Zero;
-        static string petText = "", petThinking = "";
+        static string petThinking = "";
         static List<string> petSteps = new List<string>();
-        static bool petThinkingLatest;
         /** Bottom-right corner of the card body; the card grows upward when expanded. */
         static Point petAnchor = Point.Empty;
         static int petShadow;
@@ -2393,7 +2488,8 @@ namespace DshComputerUse
                 if (visible && !petFinished) { RenderPill(); return; }
                 if (visible) HideCore(); // the previous run's "done" card is still up
                 petMode = Args.Bool(r, "pet", false);
-                petText = Args.Str(r, "text", ""); petThinking = ""; petSteps = new List<string>(); petThinkingLatest = false;
+                petThinking = Args.Str(r, "thinking", "");
+                petSteps = new List<string>();
                 if (status.Length > 0) petSteps.Add(status);
                 pillAtBottom = false;
                 paused = false;
@@ -2461,23 +2557,21 @@ namespace DshComputerUse
             Ui(delegate { status = newStatus; RenderPill(); });
         }
 
-        /** New agent output for the progress card: reply text, thinking, and the recent steps (oldest first). */
-        public static void PetUpdate(string text, string thinking, List<string> steps, bool thinkingLatest)
+        /** Latest host-provided reasoning and recent operations, oldest first. */
+        public static void PetUpdate(string thinking, List<string> steps)
         {
             if (thread == null || !visible || !petMode || petFinished) return;
             invoker.BeginInvoke((MethodInvoker)delegate
             {
                 if (petFinished) return;
-                petText = text;
                 petThinking = thinking;
                 if (steps.Count > 0) petSteps = steps;
-                petThinkingLatest = thinkingLatest;
                 RenderPill();
             });
         }
 
         /** The run ended: the card says so for a moment (longer while the pointer rests on it), then everything hides. */
-        public static void Finish(string text, int holdMs)
+        public static void Finish(int holdMs)
         {
             if (thread == null) return;
             Ui(delegate
@@ -2488,7 +2582,6 @@ namespace DshComputerUse
                 glows.Clear();
                 RemoveHook();
                 paused = false;
-                if (text.Length > 0) petText = text;
                 petFinished = true;
                 finishedAt = DateTime.UtcNow;
                 finishHoldMs = holdMs;
@@ -2791,6 +2884,7 @@ namespace DshComputerUse
             petShadow = shadow;
             float bodyW = 420 * s, pad = 16 * s;
             float headH = 44 * s, replyH = 26 * s;
+            string progress = petFinished ? "已交还电脑控制" : petThinking.Length > 0 ? "思考 · " + petThinking : "正在操作，等待下一步…";
             if (petExpanded)
             {
                 // Grow with the reply, up to about eight lines.
@@ -2798,14 +2892,12 @@ namespace DshComputerUse
                 using (var pg = Graphics.FromImage(probe))
                 using (var pf = new Font("Microsoft YaHei UI", 10.5f * 1.333f * scale, FontStyle.Regular, GraphicsUnit.Pixel))
                 {
-                    string t = petText.Length > 0 ? petText : "正在操作…";
-                    float need = pg.MeasureString(t, pf, new SizeF(420 * scale - 32 * scale, 100000), new StringFormat(StringFormat.GenericTypographic)).Height + 6 * scale;
+                    float need = pg.MeasureString(progress, pf, new SizeF(420 * scale - 32 * scale, 100000), new StringFormat(StringFormat.GenericTypographic)).Height + 6 * scale;
                     replyH = Math.Max(26 * scale, Math.Min(172 * scale, need));
                 }
             }
             int stepRows = petExpanded ? Math.Min(5, Math.Max(1, petSteps.Count)) : 0;
-            bool thinkingRow = petExpanded && petThinking.Length > 0 && !petFinished;
-            float listH = petExpanded ? 8 * s + (thinkingRow ? 24 * s : 0) + stepRows * 22 * s : 24 * s;
+            float listH = petExpanded ? 8 * s + stepRows * 22 * s : 24 * s;
             float inputH = input != null ? 46 * s : 0;
             float bodyH = headH + replyH + listH + inputH + 12 * s;
             int W = (int)Math.Ceiling(bodyW) + 2 * shadow, H = (int)Math.Ceiling(bodyH) + 2 * shadow;
@@ -2885,17 +2977,18 @@ namespace DshComputerUse
                     using (var b = new SolidBrush(paused ? Accent : muted)) g.DrawString(st, fState, b, tx, hy + (hh - stSize.Height) / 2f, fmt);
                 }
 
-                // The reply as it streams: one scrolling line, or the latest lines when expanded.
+                // Reasoning and operations use separate rows throughout.
                 float lineW = bodyW - 2 * pad;
                 float ry = body.Y + headH;
-                string text = petText.Length > 0 ? petText : (petFinished ? "" : "正在操作…");
-                using (var b = new SolidBrush(petText.Length > 0 ? ink : muted))
+                using (var b = new SolidBrush(petThinking.Length > 0 && !petFinished ? ink : muted))
                 {
                     if (petExpanded)
-                        g.DrawString(TailWrapped(g, text, fText, lineW, replyH, wrap), fText, b, new RectangleF(body.X + pad, ry, lineW, replyH), wrap);
+                        g.DrawString(TailWrapped(g, progress, fText, lineW, replyH, wrap), fText, b, new RectangleF(body.X + pad, ry, lineW, replyH), wrap);
                     else
                     {
-                        string shown = Tail(g, text, fText, lineW, fmt);
+                        string shown = petThinking.Length > 0 && !petFinished
+                            ? "思考 · " + Tail(g, petThinking, fText, lineW - g.MeasureString("思考 · ", fText, 100000, fmt).Width, fmt)
+                            : Tail(g, progress, fText, lineW, fmt);
                         SizeF size = g.MeasureString(shown.Length > 0 ? shown : " ", fText, 100000, fmt);
                         g.DrawString(shown, fText, b, body.X + pad, ry + (replyH - size.Height) / 2f, fmt);
                     }
@@ -2908,13 +3001,6 @@ namespace DshComputerUse
                     ly += 4 * s;
                     using (var pen = new Pen(edge, Math.Max(1f, s))) g.DrawLine(pen, body.X + pad, ly, body.Right - pad, ly);
                     ly += 4 * s;
-                    if (thinkingRow)
-                    {
-                        float prefixW = g.MeasureString("思考：", fAct, 100000, fmt).Width;
-                        string th = Tail(g, petThinking, fAct, lineW - prefixW, fmt);
-                        using (var b = new SolidBrush(muted)) { g.DrawString("思考：", fAct, b, body.X + pad, ly + 3 * s, fmt); g.DrawString(th, fAct, b, body.X + pad + prefixW, ly + 3 * s, fmt); }
-                        ly += 24 * s;
-                    }
                     int first = Math.Max(0, petSteps.Count - stepRows);
                     for (int i = first; i < petSteps.Count; i++)
                     {
@@ -2930,8 +3016,7 @@ namespace DshComputerUse
                 else
                 {
                     string act;
-                    if (petFinished) act = petSteps.Count > 0 ? "共 " + petSteps.Count + " 步 · " + petSteps[petSteps.Count - 1] : "";
-                    else if (petThinkingLatest && petThinking.Length > 0) act = "思考：" + Tail(g, petThinking, fAct, lineW - 14 * s - g.MeasureString("思考：", fAct, 100000, fmt).Width, fmt);
+                    if (petFinished) act = petSteps.Count > 0 ? "最后操作 · " + petSteps[petSteps.Count - 1] : "";
                     else
                     {
                         var parts = new List<string>();

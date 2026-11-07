@@ -63,11 +63,11 @@ export function previewRoute(helper: HelperLike, settings: () => Settings, overl
       label: pet ? `${s.overlayLabel} 正在操控` : `${s.overlayLabel} 正在操控你的电脑`,
       status: pet ? '预览' : '预览 · 4 秒后消失',
       icon: iconPath, iconLight: iconPath.replace(/deepseek-white\.png$/, 'deepseek-black.png'),
-      idleMs: s.userIdleMs, glow: s.overlay, pet, petOpacity: s.cardOpacity, text: '',
+      idleMs: s.userIdleMs, glow: s.overlay, pet, petOpacity: s.cardOpacity,
     })
     if (pet) {
       await helper.call('pet_update', {
-        text: '这是预览：操控电脑时，这里滚动显示 AI 的回复正文。', thinking: '第二行显示思考过程和最近几步操作', steps: ['打开应用', '输入文字', '预览 · 4 秒后消失'], thinkingLatest: false,
+        thinking: '先确认表单内容，再核对提交结果。', steps: ['打开应用', '输入文字', '预览 · 4 秒后消失'],
       }).catch(() => {})
     }
     setTimeout(() => { if (overlay.controller === undefined) void helper.call('overlay_hide').catch(() => {}) }, 4000).unref()

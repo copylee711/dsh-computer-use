@@ -68,6 +68,6 @@ export function regionToPhysical(region: readonly number[], display: Display, sh
 }
 
 /** Is a physical point on this display? */
-export function contains(display: Display, point: Point): boolean {
+export function contains(display: Rect, point: Point): boolean {
   return point.x >= display.x && point.y >= display.y && point.x < display.x + display.width && point.y < display.y + display.height
 }

@@ -6,6 +6,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { defineTool, type ToolCallView } from '@deepseek-ai/dsh-tools'
 import { appMatches, isHostWindow, isTransientShell, normalizeApp } from './access.js'
+import { isHarnessAddress, readBrowserTab } from './browser-host.js'
 import { SKILL_MAX_CHARS, type SkillStore } from './skills.js'
 import type { UiElement } from './target.js'
 import { ACTIONS, Computer, UNCHANGED_TEXT, type ActionInput, type CallContext, type Shot, type WindowInfo } from './computer.js'
@@ -100,7 +101,7 @@ const actionProperties = {
   scroll_amount: { type: 'integer', description: 'Wheel notches (default 3).' },
   duration: { type: 'number', description: 'Seconds for wait / hold_key (with until: the timeout, default 10).' },
   target: { type: 'string', description: 'Instead of coordinate: the visible name of a control in the foreground window or its open menu, e.g. "保存" or "按钮:保存". Works for controls that were not in your last screenshot (the item of a menu the previous step opens); waits up to 3 s for it. With type: clicks the field first.' },
-  until: { type: 'string', description: 'wait: return as soon as this is there, "window:<title or exe part>" or "target:<control name>", instead of waiting a fixed time.' },
+  until: { type: 'string', description: 'wait: observe "window:<title or exe part>", "target:<control name>", or "text:<window text>" instead of waiting a fixed time.' },
   gone: { type: 'boolean', description: 'wait until: wait for it to disappear instead.' },
   region: { type: 'array', items: { type: 'number' }, description: 'zoom: [x1, y1, x2, y2] in screenshot pixels.' },
 } as const
@@ -209,7 +210,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     description: 'Open an app by name (e.g. "Chrome", "记事本", "微信", "Excel"), an .exe path, or a URL, or bring it to the front if it is already running. Faster and more reliable than clicking the taskbar or Start menu. Returns a screenshot.',
     parameters: {
       name: { type: 'string', required: true, description: 'App name as shown in the Start menu, an executable path, or an http(s) URL.' },
-      new_instance: { type: 'boolean', description: 'Start another copy even though the app is already running. Only when the user explicitly asks for a second window / instance / account.' },
+      new_instance: { type: 'boolean', description: 'Open a separate browser window for a URL, or start another app instance. Use only when explicitly requested.' },
     },
     output,
     timeoutMs: 30 * 60_000,
@@ -247,14 +248,38 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       await computer.overlay.begin(call.agent, `打开 ${name}`)
       await computer.overlay.yieldToUser(call.signal, false)
       const before = await computer.foreground()
+      if (isUrl && !newInstance && before?.exe.toLowerCase() === 'chrome.exe' && before.className.startsWith('Chrome_WidgetWin')) {
+        const tab = await readBrowserTab(computer.helper, before)
+        if (tab?.tab && typeof tab.url === 'string') {
+          const denial = computer.access.denial(call.session, before, call.autoApprove ? 'allow-all' : settings.accessMode, settings.blockedApps, 'open a new tab in')
+          if (denial) throw new Error(denial)
+          if (settings.harnessUrl && isHarnessAddress(tab.url, settings.harnessUrl)) {
+            computer.overlay.rememberWebHost(before, tab.tab)
+            if (!computer.overlay.isRememberedWebWindow(before))
+              throw new Error('The current browser shows another DeepSeek Harness session. Switch to the intended browser window before opening the URL.')
+          }
+          if (call.signal.aborted) throw new Error('Cancelled.')
+          const opened = await computer.helper.call<{ tab: string }>('browser_open_tab', {
+            hwnd: before.hwnd, pid: before.pid, tab: tab.tab, url: name,
+          }, 12_000)
+          if (!opened?.tab || opened.tab === tab.tab) throw new Error('The browser did not confirm a separate work tab.')
+          computer.overlay.rememberWorkTab(before, opened.tab)
+          if (settings.accessMode === 'per-app' && call.autoApprove) computer.access.grant(call.session, [before.exe])
+          return `Opened ${name} in a new tab of the current ${before.exe} window. ${await computer.describeForeground()}${skillNote(call.session, name, before)}`
+        }
+        throw new Error('Could not verify the current browser tab. Bring a regular browser tab into view and retry. Use new_instance only if a separate window is wanted.')
+      }
       let how: string
       let openedUrlWindow: WindowInfo | undefined
       const isUri = isUrl || /^[a-z][a-z0-9+.-]+:(?![\/])/i.test(name)
-      const running = isUri || newInstance ? undefined : (await computer.windows()).find(win => !isHostWindow(win) && appMatches(name, win))
+      const matches = (win: WindowInfo): boolean => !isHostWindow(win) && appMatches(name, win)
+      const running = isUri || newInstance ? undefined : before && matches(before) ? before : (await computer.windows()).find(matches)
       // Closed to the system tray (QQ, 微信...): click its tray icon like the user
       // would. Launching it again starts a second instance (a second login).
       const hidden = running || isUri || newInstance ? undefined : (await computer.backgroundApps(false)).find(win => !isHostWindow(win) && appMatches(name, win))
       if (running) {
+        const denial = computer.access.denial(call.session, running, settings.accessMode, settings.blockedApps, 'focus')
+        if (denial) throw new Error(denial)
         const result = await computer.focus(running)
         how = result.focused ? `Brought ${running.exe} ("${running.title.slice(0, 60)}") to the front.` : `Tried to bring ${running.exe} to the front, but Windows kept another window focused.`
       } else if (hidden) {

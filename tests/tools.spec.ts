@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { AccessControl } from '../src/access.js'
 import { Computer, type Settings } from '../src/computer.js'
 import type { HelperEvent, HelperLike } from '../src/helper-client.js'
+import type { BrowserTab } from '../src/browser-host.js'
 import { OverlayController, cardRect } from '../src/overlay.js'
 import { createTools } from '../src/tools.js'
 import { SkillStore } from '../src/skills.js'
@@ -21,7 +22,7 @@ class FakeHelper implements HelperLike {
   foreground = CHROME
   failOn = ''
   hit?: typeof CHROME
-  tab: { url?: string; tab?: string } | null = null
+  tab: BrowserTab | null = null
   acted = false
   /** UI Automation elements the window reports; a function lets a test change them between looks. */
   elements: unknown[] | (() => unknown[]) = []
@@ -126,6 +127,69 @@ describe('browser host and semantic actions', () => {
     expect(t.helper.calls.find(c => c.cmd === 'focus')?.args.hwnd).toBe(HOST.hwnd)
   })
 
+  it('returns focus at the first reply chunk and resumes the prior target if the same agent needs another action', async () => {
+    const t = setup()
+    const agent = { cancel() {} }
+    const original = t.helper.call.bind(t.helper)
+    t.helper.call = async <T>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
+      const result = await original<T>(cmd, args)
+      if (cmd === 'focus') t.helper.foreground = args?.hwnd === HOST.hwnd ? HOST : CHROME
+      return result
+    }
+    t.helper.foreground = HOST
+    await t.overlay.begin(agent, '操作 Chrome')
+    t.helper.foreground = CHROME
+    t.overlay.stream(agent, { type: 'chunk', chunk: { type: 'text-delta', text: '结果开始输出' } })
+    await t.overlay.end(agent, true)
+    expect(t.helper.foreground.hwnd).toBe(HOST.hwnd)
+    expect(t.helper.calls.some(c => c.cmd === 'overlay_hide')).toBe(true)
+    expect(t.helper.calls.some(c => c.cmd === 'pet_finish')).toBe(false)
+    await t.overlay.begin(agent, '继续操作')
+    expect(t.helper.foreground.hwnd).toBe(CHROME.hwnd)
+    await t.overlay.end(agent)
+  })
+
+  it('waits for visible text in the original window and does not count unreadable text as gone', async () => {
+    const t = setup({ mode: 'allow-all', vision: false })
+    t.helper.windowText = { text: '报名成功', length: 4, truncated: false, source: 'text' }
+    const result = await t.run('computer', { action: 'wait', until: 'text:报名成功', duration: 1 })
+    expect(result.text).toContain('Text "报名成功" is there')
+    expect(t.helper.calls.find(c => c.cmd === 'text')?.args.hwnd).toBe(CHROME.hwnd)
+    t.helper.windowText = { text: '', length: 0, truncated: false, source: 'none' }
+    await expect(t.run('computer', { action: 'wait', until: 'text:报名成功', gone: true, duration: 0.2 })).rejects.toThrow(/Timed out/)
+  })
+
+  it('opens a work tab in the current Chrome HWND and protects the Web host and browser chrome', async () => {
+    const t = setup({ harnessUrl: 'http://127.0.0.1:3080' })
+    t.access.grant('s1', ['Chrome'])
+    t.helper.tab = { url: 'localhost:3080/chat', tab: 'host-tab' }
+    const original = t.helper.call.bind(t.helper)
+    t.helper.call = async <T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> => {
+      if (cmd !== 'browser_open_tab') return original<T>(cmd, args)
+      t.helper.calls.push({ cmd, args })
+      t.helper.tab = { url: 'https://example.com/', tab: 'work-tab', content: { x: 0, y: 200, width: 2560, height: 1300 }, contentFocused: true }
+      return { tab: 'work-tab' } as T
+    }
+    expect((await t.run('open_application', { name: 'https://example.com/' })).text).toContain('current chrome.exe window')
+    expect(t.helper.calls.find(c => c.cmd === 'browser_open_tab')?.args).toMatchObject({ hwnd: CHROME.hwnd, pid: CHROME.pid, tab: 'host-tab' })
+    expect(t.helper.calls.some(c => c.cmd === 'open_url')).toBe(false)
+    await expect(t.run('computer', { action: 'left_click', coordinate: [10, 10] })).rejects.toThrow(/page content/)
+    await expect(t.run('computer', { action: 'key', text: 'alt+F4' })).rejects.toThrow(/shortcuts are protected/)
+    await expect(t.run('windows', { action: 'close', hwnd: CHROME.hwnd })).rejects.toThrow(/protected/)
+    await t.run('computer', { action: 'key', text: 'Enter' })
+    t.helper.tab = { url: 'localhost:3080/chat', tab: 'host-tab' }
+    await expect(t.run('computer', { action: 'key', text: 'Enter' })).rejects.toThrow(/Web tab is protected/)
+    expect(t.helper.calls.filter(c => c.cmd === 'keys')).toHaveLength(1)
+    await t.overlay.end()
+    expect(t.helper.calls.find(c => c.cmd === 'browser_tab' && c.args.select)?.args.select).toBe('host-tab')
+  })
+
+  it('does not silently open a separate window when the current Chrome tab cannot be verified', async () => {
+    const t = setup({ mode: 'allow-all' })
+    await expect(t.run('open_application', { name: 'https://example.com/' })).rejects.toThrow(/verify the current browser tab/)
+    expect(t.helper.calls.some(c => c.cmd === 'browser_open_tab' || c.cmd === 'open_url')).toBe(false)
+  })
+
   it('leaves the browser untouched if the active tab cannot be verified', async () => {
     const t = setup({ mode: 'allow-all', harnessUrl: 'http://127.0.0.1:3080' })
     await expect(t.run('computer', { action: 'key', text: 'ctrl+l' })).rejects.toThrow(/Could not verify the active browser tab/)
@@ -154,7 +218,7 @@ describe('browser host and semantic actions', () => {
       t.helper.foreground = { ...CHROME, hwnd: 33 }
       return { exe: CHROME.exe } as T
     }
-    await t.run('open_application', { name: 'https://example.com/' })
+    await t.run('open_application', { name: 'https://example.com/', new_instance: true })
     expect(t.helper.calls.find(c => c.cmd === 'open_url')?.args.url).toBe('https://example.com/')
     expect(t.helper.calls.some(c => c.cmd === 'launch')).toBe(false)
     expect(t.access.isGranted('s1', CHROME)).toBe(true)
@@ -488,16 +552,17 @@ describe('progress card', () => {
     const overlay = new OverlayController(helper, () => settings, () => {})
     const agent = { cancel: () => {} }
     overlay.stream(agent, { type: 'start' })
-    overlay.stream(agent, { type: 'chunk', chunk: { type: 'text-delta', text: '先打开**微信**' } })
+    overlay.stream(agent, { type: 'chunk', chunk: { type: 'reasoning-delta', text: '先打开**微信**' } })
     await overlay.begin(agent, '打开 微信')
-    expect(helper.calls.find(c => c.cmd === 'overlay_show')?.args).toMatchObject({ pet: true, text: '先打开微信' })
+    expect(helper.calls.find(c => c.cmd === 'overlay_show')?.args).toMatchObject({ pet: true, thinking: '先打开微信' })
     expect(helper.calls.some(c => c.cmd === 'window_cmd' && c.args.op === 'minimize')).toBe(true)
+    overlay.stream(agent, { type: 'start' })
     overlay.stream(agent, { type: 'chunk', chunk: { type: 'reasoning-delta', text: '找群' } })
     await new Promise(resolve => setTimeout(resolve, 120))
-    expect(helper.calls.filter(c => c.cmd === 'pet_update').at(-1)?.args).toEqual({ text: '先打开微信', thinking: '找群', steps: ['打开 微信'], thinkingLatest: true })
+    expect(helper.calls.filter(c => c.cmd === 'pet_update').at(-1)?.args).toEqual({ thinking: '找群', steps: ['打开 微信'] })
     await overlay.status('点击 (10, 20)')
     await new Promise(resolve => setTimeout(resolve, 120))
-    expect(helper.calls.filter(c => c.cmd === 'pet_update').at(-1)?.args).toMatchObject({ steps: ['打开 微信', '点击 (10, 20)'], thinkingLatest: false })
+    expect(helper.calls.filter(c => c.cmd === 'pet_update').at(-1)?.args).toEqual({ thinking: '找群', steps: ['打开 微信', '点击 (10, 20)'] })
   })
 
   it('sends instructions typed into the card to the agent, and says done at the end', async () => {

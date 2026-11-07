@@ -74,7 +74,7 @@ export const Config: z<Config> = z.object({
     'en-US': { $description: 'Name in the pill: "<name> 正在操控你的电脑"' },
   }),
   hostWindow: z.union([
-    z.const('pet').i18n({ 'zh-CN': { $description: '最小化，改用右下角迷你进度卡片（两行滚动显示回复和思考 / 工具调用）' }, 'en-US': { $description: 'Minimize it and show a mini progress card (reply + thinking / tool calls)' } }),
+    z.const('pet').i18n({ 'zh-CN': { $description: '最小化，改用右下角迷你进度卡片（思考与操作时间线）' }, 'en-US': { $description: 'Minimize it and show a mini progress card (reasoning and action timeline)' } }),
     z.const('card').i18n({ 'zh-CN': { $description: '缩成右下角置顶悬浮卡片' }, 'en-US': { $description: 'Shrink to an always-on-top card' } }),
     z.const('minimize').i18n({ 'zh-CN': { $description: '最小化' }, 'en-US': { $description: 'Minimize' } }),
     z.const('keep').i18n({ 'zh-CN': { $description: '保持不变' }, 'en-US': { $description: 'Leave it as is' } }),
@@ -163,6 +163,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   const iconPath = helperAssetPath('deepseek-white.png')
   const overlay = new OverlayController(helper, settings, log, iconPath)
   const computer = new Computer(helper, access, overlay, settings)
+  overlay.onRelease = () => computer.releaseHeld()
   ctx.effect(() => () => {
     void overlay.end().finally(() => helper.dispose())
   }, 'computer-use: helper')
@@ -285,7 +286,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     }) as never, { global: true } as never), 'computer-use: quick steps')
   })
 
-  // The progress card shows the reply and the thinking / tool calls as they stream.
+  // Keep reasoning in the card and show reply text in the main conversation.
   ctx.on('agent/assistant-stream', ({ agent, frame }) => {
     overlay.stream(agent, frame as unknown as StreamFrame)
   })
@@ -308,6 +309,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   // Hide the overlay when the controlling agent stops running.
   ctx.on('agent/status', ({ agent, status }) => {
     if (status === 'running') computer.resetLook()
+    if (status === 'idle') overlay.forgetResume(agent)
     if (status === 'idle' && computer.clipboardAgent === (agent as unknown)) {
       computer.clipboardAgent = undefined
       void helper.call('clipboard_restore').catch(() => {})
@@ -315,6 +317,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (status === 'idle' && overlay.controller === (agent as unknown)) void overlay.end(agent as unknown as CancellableAgent)
   })
   ctx.on('agent/disposed', ({ agent }) => {
+    overlay.forgetResume(agent)
     access.forget((agent as unknown as AgentLike).session.id)
     if (overlay.controller === (agent as unknown)) void overlay.end()
   })

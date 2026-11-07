@@ -40,8 +40,6 @@ const TOOL_NAMES: Record<string, string> = {
   read: '读取文件', write: '写入文件', edit: '编辑文件', web_search: '搜索网页', web_fetch: '读取网页', todo_write: '更新待办',
 }
 
-/** Reply text kept for the card (the expanded card shows its last lines). */
-const KEEP_TEXT = 2000
 /** Thinking kept for the card's one-line view. */
 const KEEP_THINKING = 300
 /** Recent steps on the card's timeline. */
@@ -100,22 +98,21 @@ export class OverlayController {
   private hostWindows: Array<{ hwnd: number; mode: 'card' | 'minimize'; maximized?: boolean | undefined }> = []
   private returnTo: { window: WindowRow; web: boolean; tab?: string | undefined } | undefined
   private ending: Promise<void> | undefined
+  private workTab: string | undefined
   private starting: Promise<void> | undefined
   private stopping = false
-  /** Progress card lines: the reply as it streams, and what the agent is doing. */
+  /** Progress card lines: host-provided reasoning and recent operations. */
   private streamAgent: unknown
-  private text = ''
   private thinking = ''
   /** Recent steps (tool actions), oldest first. */
   private steps: string[] = []
-  /** Whether the agent is thinking now (newer than the last step). */
-  private thinkingLatest = false
-  private freshAttempt = true
+  private resume: { agent: CancellableAgent; host: WindowRow; target: WindowRow; tab?: string | undefined } | undefined
   private pushTimer: NodeJS.Timeout | undefined
   /** An instruction the user typed into the progress card. */
   onMessage: ((agent: CancellableAgent, text: string) => void) | undefined
   /** Called when control starts (before the first action), e.g. to remember the window layout. */
   onStart: (() => Promise<void>) | undefined
+  onRelease: (() => Promise<void>) | undefined
   /** Opacity the card was last given, to apply setting changes while it floats. */
   private cardOpacity = 100
   /** Paused by Esc or the pill; actions wait until resumed. */
@@ -201,13 +198,25 @@ export class OverlayController {
 
   private async start(agent: CancellableAgent | undefined, status: string, settings: OverlaySettings): Promise<void> {
     await this.rememberHost(settings.harnessUrl).catch(error => this.log(`remember host: ${String(error)}`))
+    const resume = this.resume
+    this.resume = undefined
+    const host = this.returnTo?.window
+    const foreground = resume && await this.helper.call<WindowRow | null>('foreground').catch(() => null)
     await this.onStart?.().catch(error => this.log(`overlay start: ${String(error)}`))
     await this.shrinkHost(settings.hostWindow)
+    if (resume && resume.agent === agent && host?.hwnd === resume.host.hwnd && host.pid === resume.host.pid
+      && foreground?.hwnd === host.hwnd && foreground.pid === host.pid) {
+      const { hwnd, pid } = resume.target
+      const focused = await this.helper.call<{ focused?: boolean }>('focus', { hwnd, pid }, 3000).catch(() => undefined)
+      if (focused?.focused && resume.tab) {
+        const selected = await this.helper.call<{ selected?: boolean }>('browser_tab', { hwnd, pid, select: resume.tab }, 2500).catch(() => undefined)
+        if (selected?.selected) this.rememberWorkTab(resume.target, resume.tab)
+      }
+    }
     const pet = settings.hostWindow === 'pet'
     if (settings.overlay || pet) {
-      if (this.streamAgent !== agent) { this.text = ''; this.thinking = '' }
+      if (this.streamAgent !== agent) this.thinking = ''
       this.steps = status ? [status] : []
-      this.thinkingLatest = false
       await this.helper.call('overlay_show', {
         label: pet ? `${settings.overlayLabel || 'DeepSeek Harness'} 正在操控` : `${settings.overlayLabel || 'DeepSeek Harness'} 正在操控你的电脑`,
         status,
@@ -217,7 +226,7 @@ export class OverlayController {
         glow: settings.overlay,
         pet,
         petOpacity: settings.cardOpacity,
-        text: this.text,
+        thinking: this.thinking,
       }).catch(error => this.log(`overlay: ${String(error)}`))
     }
   }
@@ -235,24 +244,24 @@ export class OverlayController {
     const line = plainLine(text).trim()
     if (line === '' || this.steps.at(-1) === line) return
     this.steps = [...this.steps, line].slice(-KEEP_STEPS)
-    this.thinkingLatest = false
     this.schedulePush()
   }
 
   /** Live model output (DSH agent/assistant-stream) for the progress card. */
   stream(agent: unknown, frame: StreamFrame): void {
-    if (agent !== this.streamAgent) { this.streamAgent = agent; this.text = ''; this.thinking = ''; this.steps = [] }
-    if (frame.type === 'start') { this.freshAttempt = true; this.thinking = ''; return }
+    if (this.visible && agent !== this.agent) return
+    if (agent !== this.streamAgent) { this.streamAgent = agent; this.thinking = ''; this.steps = [] }
+    if (frame.type === 'start') { this.thinking = ''; this.schedulePush(); return }
     if (this.visible && agent === this.agent) this.armIdle()
     const chunk = frame.type === 'chunk' ? frame.chunk : undefined
     if (!chunk) return
-    if (chunk.type === 'text-delta' && chunk.text) {
-      if (this.freshAttempt) { this.text = ''; this.freshAttempt = false }
-      this.text = plainLine(this.text + chunk.text).slice(-KEEP_TEXT)
-    } else if (chunk.type === 'reasoning-delta' && chunk.text) {
-      this.thinking = plainLine(this.thinking + chunk.text).slice(-KEEP_THINKING)
-      this.thinkingLatest = true
-    } else return
+    if (chunk.type === 'text-delta' && chunk.text?.trim()) {
+      if (this.visible && this.agent && agent === this.agent && !this.paused && !this.stopping)
+        void this.end(this.agent, true).catch(error => this.log(`reply handoff: ${String(error)}`))
+      return
+    }
+    if (chunk.type !== 'reasoning-delta' || !chunk.text) return
+    this.thinking = plainLine(this.thinking + chunk.text).slice(-KEEP_THINKING)
     this.schedulePush()
   }
 
@@ -276,14 +285,14 @@ export class OverlayController {
       this.pushTimer = undefined
       if (!this.visible) return
       void this.helper.call('pet_update', {
-        text: this.text, thinking: this.thinking.trim(), steps: this.steps, thinkingLatest: this.thinkingLatest,
+        thinking: this.thinking.trim(), steps: this.steps,
       }).catch(() => {})
     }, 80)
     this.pushTimer.unref?.()
   }
 
   /** Agent finished (idle), was cancelled, or the plugin is stopping. */
-  async end(agent?: CancellableAgent): Promise<void> {
+  async end(agent?: CancellableAgent, replying = false): Promise<void> {
     if (this.starting) await this.starting
     if (agent !== undefined && this.agent !== undefined && agent !== this.agent) return
     if (this.idleTimer) clearTimeout(this.idleTimer)
@@ -298,7 +307,14 @@ export class OverlayController {
     if (this.pushTimer) { clearTimeout(this.pushTimer); this.pushTimer = undefined }
     // The progress card says "done" for a moment; a stop by the user hides at once.
     this.ending = (async () => {
-      if (this.settings().hostWindow === 'pet' && !this.stopping) await this.helper.call('pet_finish', { text: this.text, holdMs: FINISH_HOLD_MS }).catch(() => {})
+      await this.onRelease?.().catch(error => this.log(`release input: ${String(error)}`))
+      if (replying && agent && this.returnTo) {
+        const host = this.returnTo.window
+        const target = await this.helper.call<WindowRow | null>('foreground').catch(() => null)
+        if (target?.hwnd && (target.hwnd !== host.hwnd || this.workTab))
+          this.resume = { agent, host, target, tab: target.hwnd === host.hwnd ? this.workTab : undefined }
+      }
+      if (!replying && this.settings().hostWindow === 'pet' && !this.stopping) await this.helper.call('pet_finish', { holdMs: FINISH_HOLD_MS }).catch(() => {})
       else await this.helper.call('overlay_hide').catch(() => {})
       await this.restoreHost()
       await this.focusRememberedHost().catch(error => this.log(`restore focus: ${String(error)}`))
@@ -309,6 +325,24 @@ export class OverlayController {
   isRememberedWebWindow(win: { hwnd: number; pid: number }): boolean {
     const target = this.returnTo
     return target?.web === true && target.window.hwnd === win.hwnd && target.window.pid === win.pid
+  }
+
+  forgetResume(agent: unknown): void {
+    const clear = () => { if (this.resume?.agent === agent) this.resume = undefined }
+    if (this.ending) void this.ending.then(clear, clear)
+    else clear()
+  }
+
+  rememberWorkTab(win: { hwnd: number; pid: number }, tab: string): void {
+    if (this.isRememberedWebWindow(win)) this.workTab = tab
+  }
+
+  rememberWebHost(win: WindowRow, tab: string): void {
+    if (!this.returnTo) this.returnTo = { window: win, web: true, tab }
+  }
+
+  isWorkTab(tab: string): boolean {
+    return this.workTab === tab && this.returnTo?.tab !== tab
   }
 
   private async rememberHost(harnessUrl: string | undefined): Promise<void> {
@@ -332,6 +366,7 @@ export class OverlayController {
   private async focusRememberedHost(): Promise<void> {
     const target = this.returnTo
     this.returnTo = undefined
+    this.workTab = undefined
     if (!target) return
     const { hwnd, pid } = target.window
     const result = await this.helper.call<{ focused?: boolean }>('focus', { hwnd, pid }, 3000)

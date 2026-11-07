@@ -5,7 +5,7 @@
  */
 import { setTimeout as sleep } from 'node:timers/promises'
 import { appMatches, isHostWindow, isTransientShell, type AccessControl, type AccessMode, type WindowLike } from './access.js'
-import { isBrowser, isHarnessAddress, readBrowserTab } from './browser-host.js'
+import { isBrowser, isHarnessAddress, readBrowserTab, safeSharedBrowserKeys, type BrowserTab } from './browser-host.js'
 import { contains, regionToPhysical, screenshotSize, toPhysical, toScreenshot, type Display, type Point, type Size } from './coords.js'
 import type { HelperLike } from './helper-client.js'
 import { parseKeys, parseModifiers } from './keys.js'
@@ -373,32 +373,42 @@ export class Computer {
     return `Foreground window: ${win.exe} — "${win.title.slice(0, 80)}".`
   }
 
-  async assertAllowed(call: CallContext, win: WindowInfo | undefined, verb: string): Promise<void> {
+  async assertAllowed(call: CallContext, win: WindowInfo | undefined, verb: string): Promise<BrowserTab | undefined> {
     const s = this.settings()
     const reason = this.access.denial(call.session, win, s.accessMode, s.blockedApps, verb)
     if (reason) throw new Error(reason)
     if (win && s.harnessUrl && isBrowser(win)) {
-      const tab = await readBrowserTab(this.helper, win)
-      if (isHarnessAddress(tab?.url, s.harnessUrl) || this.overlay.isRememberedWebWindow(win))
-        throw new Error('The DeepSeek Harness Web tab is protected. Use open_application with a URL to open a separate browser window.')
+      const shared = this.overlay.isRememberedWebWindow(win)
+      const tab = await readBrowserTab(this.helper, win, shared)
+      if (isHarnessAddress(tab?.url, s.harnessUrl) || (shared && (!tab?.tab || !this.overlay.isWorkTab(tab.tab))))
+        throw new Error('The DeepSeek Harness Web tab is protected. Use open_application with the target URL to open a work tab in the current browser.')
       if (typeof tab?.url !== 'string' || !tab.tab)
-        throw new Error('Could not verify the active browser tab. Use open_application with a URL or switch to a browser window with a visible address bar.')
+        throw new Error('Could not verify the active browser tab. Use open_application with the target URL or switch to a browser window with a visible address bar.')
+      if (shared) return tab
     }
+  }
+
+  private checkWebContent(tab: BrowserTab | undefined, point: Point): void {
+    if (tab && (!tab.content || !contains(tab.content, point)))
+      throw new Error('Only the work tab’s page content can be operated in the window containing DeepSeek Harness.')
   }
 
   private async checkPointer(call: CallContext, point: Point | undefined, verb: string): Promise<void> {
     const target = point ?? await this.cursor()
-    await this.assertAllowed(call, await this.windowAt(target), verb)
+    this.checkWebContent(await this.assertAllowed(call, await this.windowAt(target), verb), target)
   }
 
   private async checkKeyboard(call: CallContext, verb: string): Promise<WindowInfo | undefined> {
     const window = await this.foreground()
-    await this.assertAllowed(call, window, verb)
+    const tab = await this.assertAllowed(call, window, verb)
+    if (tab && !tab.contentFocused) throw new Error('Focus a control in the work tab’s page before sending keyboard input.')
     return window
   }
 
   private async sendKeys(call: CallContext, combos: number[][], holdMs?: number): Promise<void> {
     const window = await this.checkKeyboard(call, 'send keys to')
+    if (window && this.overlay.isRememberedWebWindow(window) && (holdMs !== undefined || !safeSharedBrowserKeys(combos)))
+      throw new Error('Browser and window shortcuts are protected in the window containing DeepSeek Harness.')
     const args = holdMs === undefined ? {} : { holdMs }
     if (!this.settings().harnessUrl || !window || !isBrowser(window) || combos.length < 2) {
       await this.helper.call('keys', { combos, ...args }, holdMs === undefined ? undefined : 20_000)
@@ -409,6 +419,7 @@ export class Computer {
       if (index > 0) {
         await sleep(100, undefined, { signal: call.signal })
         await this.checkNamed(call, window)
+        if (this.overlay.isRememberedWebWindow(window)) await this.checkKeyboard(call, 'send keys to')
       }
       await this.helper.call('keys', { combos: [combo], ...args }, holdMs === undefined ? undefined : 20_000)
     }
@@ -511,14 +522,14 @@ export class Computer {
     return { point: undefined, label: ' at the cursor' }
   }
 
-  private async checkNamed(call: CallContext, win: WindowInfo): Promise<void> {
+  private async checkNamed(call: CallContext, win: WindowInfo): Promise<BrowserTab | undefined> {
     const current = await this.foreground()
     if (current?.hwnd !== win.hwnd || current.pid !== win.pid) throw new Error('The named target window changed. Look again before acting.')
-    await this.assertAllowed(call, current, 'act on')
+    return this.assertAllowed(call, current, 'act on')
   }
 
   private async checkNamedPoint(call: CallContext, point: Point, window: WindowInfo, element: UiElement): Promise<WindowInfo> {
-    await this.checkNamed(call, window)
+    this.checkWebContent(await this.checkNamed(call, window), point)
     const hit = await this.windowAt(point)
     if (!hit || hit.pid !== window.pid || hit.hwnd !== (element.windowHwnd ?? window.hwnd))
       throw new Error('Another window covers the named target. Look again before acting.')
@@ -557,15 +568,30 @@ export class Computer {
     const until = (input.until ?? '').trim()
     const split = until.search(/[:：]/)
     const prefix = split > 0 ? until.slice(0, split).trim().toLowerCase() : ''
-    const kind = prefix === 'window' ? 'window' : 'target'
-    const subject = (prefix === 'window' || prefix === 'target' ? until.slice(split + 1) : until).trim()
-    if (subject === '') throw new Error('wait until needs "window:<title or exe>" or "target:<control name>".')
+    const kind = prefix === 'window' || prefix === 'text' ? prefix : 'target'
+    const subject = (prefix === 'window' || prefix === 'target' || prefix === 'text' ? until.slice(split + 1) : until).trim()
+    if (subject === '') throw new Error('wait until needs "window:<title or exe>", "target:<control name>", or "text:<window text>".')
     const gone = input.gone === true
     const timeout = Math.min(60, Math.max(0.2, Number(input.duration ?? 10) || 10)) * 1000
     const needle = subject.toLowerCase()
     let suggestions: string[] = []
     let firstSeen: number | undefined
-    const present = async (): Promise<boolean> => {
+    const started = Date.now()
+    const textWindow = kind === 'text' ? await this.foreground() : undefined
+    if (kind === 'text' && !textWindow) throw new Error('No foreground window to observe for text.')
+    const textTab = textWindow && isBrowser(textWindow) ? (await readBrowserTab(this.helper, textWindow))?.tab : undefined
+    const present = async (): Promise<boolean | undefined> => {
+      if (textWindow) {
+        const limit = Math.max(100, Math.min(1500, timeout - (Date.now() - started)))
+        if (textTab && (await readBrowserTab(this.helper, textWindow))?.tab !== textTab) return undefined
+        const result = await this.helper.call<WindowInfo & { text: string; source: string; truncated: boolean }>('text', {
+          hwnd: textWindow.hwnd, timeoutMs: limit, tail: 20_000,
+        }, limit + 1500).catch(() => undefined)
+        if (!result || result.hwnd !== textWindow.hwnd || result.pid !== textWindow.pid || result.source === 'none') return undefined
+        if (textTab && (await readBrowserTab(this.helper, textWindow))?.tab !== textTab) return undefined
+        const found = result.text.toLowerCase().includes(needle)
+        return !found && result.truncated && gone ? undefined : found
+      }
       if (kind === 'window') {
         // By title or exe, or by the app's name the way open_application understands it ("记事本" is Notepad.exe).
         const matches = (win: WindowInfo): boolean => win.title.toLowerCase().includes(needle) || win.exe.toLowerCase().includes(needle) || appMatches(subject, win)
@@ -586,18 +612,18 @@ export class Computer {
       if (match.kind === 'missing') suggestions = match.suggestions
       return match.kind !== 'missing'
     }
-    const started = Date.now()
     for (;;) {
       if (signal.aborted) throw new Error('Cancelled.')
-      if (await present() !== gone) {
-        const text = `${kind === 'window' ? 'Window' : 'Control'} "${subject}" ${gone ? 'is gone' : 'is there'} after ${((Date.now() - started) / 1000).toFixed(1)}s.`
+      const found = await present()
+      if (found !== undefined && found !== gone) {
+        const text = `${kind === 'window' ? 'Window' : kind === 'text' ? 'Text' : 'Control'} "${subject}" ${gone ? 'is gone' : 'is there'} after ${((Date.now() - started) / 1000).toFixed(1)}s.`
         // A window that just appeared is still drawing: the screenshot that follows should show it finished.
         await this.settle(signal)
         return text
       }
       if (Date.now() - started >= timeout) {
         const near = !gone && kind === 'target' && suggestions.length ? ` Controls there now: ${suggestions.map(name => `"${name.slice(0, 40)}"`).join(', ')}.` : ''
-        throw new Error(`Timed out after ${Math.round(timeout / 1000)}s waiting for ${kind === 'window' ? 'window' : 'control'} "${subject}" to ${gone ? 'disappear' : 'appear'}.${near}`)
+        throw new Error(`Timed out after ${Math.round(timeout / 1000)}s waiting for ${kind === 'window' ? 'window' : kind === 'text' ? 'text' : 'control'} "${subject}" to ${gone ? 'disappear' : 'appear'}.${near}`)
       }
       await sleep(POLL_MS, undefined, { signal })
     }
@@ -684,12 +710,18 @@ export class Computer {
         const from = await this.point(input.start_coordinate, 'start_coordinate')
         const to = await this.point(input.coordinate)
         await this.checkPointer(call, from, 'drag in')
+        if (this.settings().harnessUrl) await this.checkPointer(call, to, 'drag to')
         await this.helper.call('drag', { x1: from.x, y1: from.y, x2: to.x, y2: to.y, button: 'left' })
         return { text: `Dragged from (${input.start_coordinate!.join(', ')}) to (${input.coordinate!.join(', ')}).` }
       }
       case 'left_mouse_down': case 'left_mouse_up': {
         const p = input.coordinate ? await this.point(input.coordinate) : undefined
-        if (action === 'left_mouse_down') await this.checkPointer(call, p, 'press the mouse in')
+        if (action === 'left_mouse_down') {
+          const window = await this.windowAt(p ?? await this.cursor())
+          if (window && this.overlay.isRememberedWebWindow(window))
+            throw new Error('Use a single drag action within the work page instead of holding the mouse button in this browser window.')
+          await this.assertAllowed(call, window, 'press the mouse in')
+        }
         await this.helper.call('button', { ...(p ?? {}), button: 'left', up: action === 'left_mouse_up' })
         this.heldButton = action === 'left_mouse_down'
         return { text: `Left button ${action === 'left_mouse_down' ? 'down' : 'up'}.` }
@@ -781,6 +813,7 @@ export class Computer {
           throw new Error(`Stopped after ${done} of ${items.join('').length} characters: the user paused and ${now.exe} is now in front. Check the screen and continue from where the text stops.`)
         }
       }
+      if (index > 0 && target && this.overlay.isRememberedWebWindow(target)) await this.checkKeyboard(call, 'type into')
       await step(item, index)
       done += item.length
     }

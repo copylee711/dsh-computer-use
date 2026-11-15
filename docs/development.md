@@ -25,6 +25,10 @@ pnpm pack:check
 | `node scripts/helper-smoke.mjs` | 辅助程序编译、截图和浮层。加 `--notepad` 用临时文件验证中文输入。 |
 | `node scripts/uia-chromium-smoke.mjs` | 隔离浏览器配置中的控件读取、UIA 动作和标签恢复。可传入 Chrome 或 Edge 的 exe 路径。 |
 | `node scripts/native-smoke.mjs --notepad` | 对比 koffi 与辅助程序路径。在 DSH 运行时下运行，或设置 `DSH_KOFFI_PATH`。 |
+| `./scripts/test-card-recovery.ps1` | 用独立测试窗口检查 helper 强制退出、正常退出后的卡片恢复，包括最大化、置顶和原本半透明的窗口。 |
+| `node scripts/test-helper-recovery.mjs` | 先运行上一项生成测试窗口程序，再验证 HelperClient 崩溃、超时和 dispose 后自动恢复窗口。 |
+
+卡片的原始位置、显示状态、扩展样式及透明度保存在目标窗口的专用 Win32 属性中。helper 正常退出时恢复自己管理的卡片；新 helper 启动时恢复已退出 helper 遗留的卡片。插件进程仍运行时，helper 崩溃或超时会触发替代 helper 自动恢复；整个宿主进程被强制结束时，则在下次启动 helper 时恢复。仍存活的其他 helper 管理的窗口不会被启动清理接管。
 
 ## 本地联调
 

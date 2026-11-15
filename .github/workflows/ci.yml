@@ -40,6 +40,10 @@ jobs:
           cache: pnpm
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm run build
+      - name: Verify card recovery after helper termination
+        run: |
+          ./scripts/test-card-recovery.ps1
+          node scripts/test-helper-recovery.mjs
       - name: Compile and ping the helper
         run: |
           node --input-type=module -e "

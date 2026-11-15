@@ -110,13 +110,14 @@ export function useHostedHelper(on = true): void {
   hostedHelper = on
 }
 
-interface Pending { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout }
+interface Pending { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout; child: ChildProcessWithoutNullStreams }
 
 export class HelperClient implements HelperLike {
   private child: ChildProcessWithoutNullStreams | undefined
   private starting: Promise<ChildProcessWithoutNullStreams> | undefined
   private readonly pending = new Map<number, Pending>()
   private readonly listeners = new Set<(event: HelperEvent) => void>()
+  private readonly cardChildren = new WeakSet<ChildProcessWithoutNullStreams>()
   private nextId = 0
   private disposed = false
 
@@ -130,6 +131,7 @@ export class HelperClient implements HelperLike {
   async call<T = unknown>(cmd: string, args: Record<string, unknown> = {}, timeoutMs = 20_000): Promise<T> {
     if (this.disposed) throw new Error('computer-use helper is shut down')
     const child = await this.ensure()
+    if (this.disposed) throw new Error('computer-use helper is shut down')
     const id = ++this.nextId
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -138,7 +140,9 @@ export class HelperClient implements HelperLike {
         // The helper handles one command at a time; a stuck one blocks the rest.
         this.kill()
       }, timeoutMs)
-      this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer })
+      this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer, child })
+      // Also recover when the card request dies before it can reply.
+      if (cmd === 'window_card') this.cardChildren.add(child)
       child.stdin.write(`${JSON.stringify({ ...args, id, cmd })}\n`)
     })
   }
@@ -214,16 +218,31 @@ export class HelperClient implements HelperLike {
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', (chunk: string) => this.log(`helper stderr: ${chunk.trim()}`))
     child.on('exit', code => {
-      if (this.child === child) this.child = undefined
-      this.starting = undefined
+      if (this.child === child) {
+        this.child = undefined
+        this.starting = undefined
+      }
       for (const [id, entry] of this.pending) {
+        if (entry.child !== child) continue
         clearTimeout(entry.timer)
         entry.reject(new Error(`computer-use helper exited (code ${String(code)})`))
         this.pending.delete(id)
       }
+      // Starting a replacement restores orphaned HWND snapshots before ready.
+      // No retry loop: a helper that fails at startup has no cardChildren entry.
+      if (this.cardChildren.has(child) && (!this.disposed || code !== 0)) {
+        const recovery = this.disposed ? new HelperClient(this.log) : this
+        void recovery.call('window_recover')
+          .catch(error => { if (!recovery.disposed) this.log(`recover host window: ${String(error)}`) })
+          .finally(() => { if (recovery !== this) recovery.dispose() })
+      }
     })
     await readyPromise
     this.child = child
+    if (this.disposed) {
+      this.kill()
+      throw new Error('computer-use helper is shut down')
+    }
     return child
   }
 

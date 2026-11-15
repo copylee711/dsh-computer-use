@@ -82,6 +82,10 @@ namespace DshComputerUse
         [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hwnd, uint cmd);
         [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hwnd, int index);
         [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hwnd, int index, int value);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool SetProp(IntPtr hwnd, string name, IntPtr value);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr GetProp(IntPtr hwnd, string name);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr RemoveProp(IntPtr hwnd, string name);
+        [DllImport("user32.dll")] public static extern bool GetLayeredWindowAttributes(IntPtr hwnd, out uint key, out byte alpha, out uint flags);
         [DllImport("user32.dll")] public static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint key, byte alpha, uint flags);
         [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
         [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
@@ -205,11 +209,13 @@ namespace DshComputerUse
             var parser = new JavaScriptSerializer();
             parser.MaxJsonLength = int.MaxValue;
             Apps.Warm();
+            Windows.RecoverCards(false);
 
             var hello = new Dictionary<string, object>();
             hello["event"] = "ready"; hello["version"] = Version; hello["pid"] = Process.GetCurrentProcess().Id;
             Emit(hello);
 
+            try {
             string line;
             while ((line = input.ReadLine()) != null)
             {
@@ -232,7 +238,8 @@ namespace DshComputerUse
                 }
                 Emit(reply);
             }
-            Overlay.Shutdown();
+            }
+            finally { Windows.RecoverCards(true); Overlay.Shutdown(); }
             return 0;
         }
 
@@ -283,6 +290,7 @@ namespace DshComputerUse
                 case "clipboard_release": Clip.Release(); return null;
                 case "paste": return Input.Paste(Args.Str(r, "text", ""), Args.Bool(r, "restore", true), Args.Int(r, "waitMs", 250));
                 case "windows": return Windows.List();
+                case "window_recover": Windows.RecoverCards(false); return null;
                 case "background": return Windows.Background(Args.Bool(r, "tray", true));
                 case "tray_restore": return Tray.Restore(Args.Str(r, "exe", ""));
                 case "card_opacity": CardLayer.SetOpacity(Args.Int(r, "opacity", 100)); return null;
@@ -960,7 +968,9 @@ namespace DshComputerUse
         {
             var hwnd = Hwnd;
             Hwnd = IntPtr.Zero;
-            if (hwnd != IntPtr.Zero && Native.IsWindow(hwnd)) Native.SetWindowLong(hwnd, -20, originalEx);
+            lock (Gate) {
+                if (hwnd != IntPtr.Zero && Native.IsWindow(hwnd)) Native.SetWindowLong(hwnd, -20, originalEx);
+            }
         }
 
         public static Rectangle Frame(IntPtr hwnd)
@@ -1380,20 +1390,60 @@ namespace DshComputerUse
             return d;
         }
 
-        static readonly Dictionary<long, Native.WINDOWPLACEMENT> cards = new Dictionary<long, Native.WINDOWPLACEMENT>();
+        // Values live on the target HWND, not in helper memory. A replacement
+        // helper can restore them after a timeout/kill, without stale HWND files.
+        const string CardPrefix = "DSH.ComputerUse.Card.v1.";
+        static readonly string[] CardFields = { "flags", "show", "minX", "minY", "maxX", "maxY", "left", "top", "right", "bottom", "ex", "key", "alpha", "layerFlags" };
+
+        static void SaveCard(IntPtr hwnd)
+        {
+            if (Native.GetProp(hwnd, CardPrefix + "owner") != IntPtr.Zero) return;
+            var wp = new Native.WINDOWPLACEMENT(); wp.length = Marshal.SizeOf(wp);
+            if (!Native.GetWindowPlacement(hwnd, ref wp)) throw new Exception("Cannot save host window placement");
+            uint key, flags; byte alpha;
+            Native.GetLayeredWindowAttributes(hwnd, out key, out alpha, out flags);
+            int[] values = { wp.flags, wp.showCmd, wp.ptMinPosition.X, wp.ptMinPosition.Y, wp.ptMaxPosition.X, wp.ptMaxPosition.Y,
+                wp.rcNormalPosition.Left, wp.rcNormalPosition.Top, wp.rcNormalPosition.Right, wp.rcNormalPosition.Bottom,
+                Native.GetWindowLong(hwnd, -20), unchecked((int)key), alpha, unchecked((int)flags) };
+            try {
+                for (int i = 0; i < values.Length; i++)
+                    if (!Native.SetProp(hwnd, CardPrefix + CardFields[i], new IntPtr(values[i]))) throw new Exception("Cannot save host window state");
+                // Commit marker is written last, before any window mutation.
+                if (!Native.SetProp(hwnd, CardPrefix + "owner", new IntPtr(Process.GetCurrentProcess().Id))) throw new Exception("Cannot save host window owner");
+            }
+            catch { ClearCard(hwnd); throw; }
+        }
+
+        static void ClearCard(IntPtr hwnd)
+        {
+            Native.RemoveProp(hwnd, CardPrefix + "owner");
+            foreach (string field in CardFields) Native.RemoveProp(hwnd, CardPrefix + field);
+        }
+
+        public static void RecoverCards(bool own)
+        {
+            int self = Process.GetCurrentProcess().Id;
+            Native.EnumWindowsProc cb = delegate(IntPtr hwnd, IntPtr data) {
+                int owner = Native.GetProp(hwnd, CardPrefix + "owner").ToInt32();
+                if (owner == 0) return true;
+                bool restore = own && owner == self;
+                if (!own && owner != self) {
+                    try { using (var p = Process.GetProcessById(owner)) restore = p.HasExited; }
+                    catch (ArgumentException) { restore = true; }
+                    catch (Exception) { return true; } // do not touch a live/inaccessible helper
+                }
+                if (restore) { try { Uncard(hwnd); } catch (Exception) { } }
+                return true;
+            };
+            Native.EnumWindows(cb, IntPtr.Zero); GC.KeepAlive(cb);
+        }
 
         /// Shrink a window into an always-on-top card; Uncard restores it exactly.
         public static object Card(IntPtr hwnd, int x, int y, int w, int h)
         {
             if (!Native.IsWindow(hwnd)) throw new Exception("window no longer exists");
+            SaveCard(hwnd);
             CardLayer.Attach(hwnd);
-            if (!cards.ContainsKey(hwnd.ToInt64()))
-            {
-                var wp = new Native.WINDOWPLACEMENT();
-                wp.length = Marshal.SizeOf(typeof(Native.WINDOWPLACEMENT));
-                Native.GetWindowPlacement(hwnd, ref wp);
-                cards[hwnd.ToInt64()] = wp;
-            }
             // A minimized window restores to its previous state, which may be maximized: restore until normal.
             for (int i = 0; i < 2 && (Native.IsIconic(hwnd) || Native.IsZoomed(hwnd)); i++) { Native.ShowWindow(hwnd, 9); Thread.Sleep(150); }
             Native.SetWindowPos(hwnd, new IntPtr(-1), x, y, w, h, 0x0010 | 0x0040); // TOPMOST, NOACTIVATE | SHOWWINDOW
@@ -1410,19 +1460,25 @@ namespace DshComputerUse
         public static object Uncard(IntPtr hwnd)
         {
             if (CardLayer.Hwnd == hwnd) CardLayer.Detach();
-            Native.WINDOWPLACEMENT wp;
-            bool known = cards.TryGetValue(hwnd.ToInt64(), out wp);
-            cards.Remove(hwnd.ToInt64());
             if (!Native.IsWindow(hwnd)) return null;
-            Native.SetWindowPos(hwnd, new IntPtr(-2), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010); // NOTOPMOST
-            if (known)
+            if (Native.GetProp(hwnd, CardPrefix + "owner") != IntPtr.Zero)
             {
+                int[] v = new int[CardFields.Length];
+                for (int i = 0; i < v.Length; i++) v[i] = Native.GetProp(hwnd, CardPrefix + CardFields[i]).ToInt32();
+                var wp = new Native.WINDOWPLACEMENT(); wp.length = Marshal.SizeOf(wp);
+                wp.flags = v[0]; wp.showCmd = v[1];
+                wp.ptMinPosition = new Native.POINT(v[2], v[3]); wp.ptMaxPosition = new Native.POINT(v[4], v[5]);
+                wp.rcNormalPosition = new Native.RECT { Left = v[6], Top = v[7], Right = v[8], Bottom = v[9] };
+                Native.SetWindowLong(hwnd, -20, v[10]);
+                if ((v[10] & 0x80000) != 0 && v[13] != 0) Native.SetLayeredWindowAttributes(hwnd, unchecked((uint)v[11]), (byte)v[12], unchecked((uint)v[13]));
+                if (!Native.SetWindowPos(hwnd, new IntPtr((v[10] & 8) != 0 ? -1 : -2), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)) throw new Exception("Cannot restore host window style");
                 // Restore the normal rectangle first, then the original show state (maximized etc.).
                 int show = wp.showCmd;
                 wp.showCmd = 1; // SW_SHOWNORMAL
-                Native.SetWindowPlacement(hwnd, ref wp);
+                if (!Native.SetWindowPlacement(hwnd, ref wp)) throw new Exception("Cannot restore host window placement");
                 if (show == 3) Native.ShowWindow(hwnd, 3);
                 else if (show == 2) Native.ShowWindow(hwnd, 6);
+                ClearCard(hwnd);
             }
             return Describe(hwnd);
         }

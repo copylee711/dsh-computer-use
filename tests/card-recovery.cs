@@ -1,6 +1,8 @@
 // Integration fixture: only manipulates its own scratch WinForms window.
 using System;
 using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Imaging;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -17,6 +19,14 @@ internal static class CardRecoveryTest
     {
         if (args.Length > 0 && args[0] == "--helper")
             return (int)typeof(DshComputerUse.Native).Assembly.GetType("DshComputerUse.Program").GetMethod("Main", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] { new string[0] });
+        using (var frame = new Bitmap(7, 5, PixelFormat.Format32bppRgb))
+        {
+            Check(!MagCapture.HasVisiblePixels(frame), "a black magnifier frame is unusable");
+            frame.SetPixel(6, 4, Color.FromArgb(3, 2, 1));
+            Check(!MagCapture.HasVisiblePixels(frame), "black-level noise is ignored");
+            frame.SetPixel(6, 4, Color.FromArgb(0, 0, 4));
+            Check(MagCapture.HasVisiblePixels(frame), "a dark frame with visible content is usable");
+        }
         Form form = null;
         var ready = new ManualResetEvent(false);
         var ui = new Thread(delegate() {

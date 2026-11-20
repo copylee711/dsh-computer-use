@@ -1077,6 +1077,7 @@ namespace DshComputerUse
         public static Bitmap Capture(Rectangle area, IntPtr exclude)
         {
             if (!Ready()) return null;
+            Bitmap result = null;
             try
             {
                 // The never-shown host must be as large as the capture, or the control is clipped.
@@ -1086,7 +1087,7 @@ namespace DshComputerUse
                 frame = null;
                 var rc = new Native.RECT { Left = area.Left, Top = area.Top, Right = area.Right, Bottom = area.Bottom };
                 if (!MagSetWindowSource(magnifier, rc)) { broken = true; Why = "source"; return null; }
-                var result = frame;
+                result = frame;
                 frame = null;
                 if (result == null || result.Width != area.Width || result.Height != area.Height)
                 {
@@ -1095,9 +1096,43 @@ namespace DshComputerUse
                     broken = true;
                     return null;
                 }
+                if (!HasVisiblePixels(result))
+                {
+                    result.Dispose();
+                    broken = true;
+                    Why = "black magnifier frame";
+                    Console.Error.WriteLine("Magnification capture returned a black frame; using BitBlt for the rest of this helper process.");
+                    return null;
+                }
                 return result;
             }
-            catch (Exception e) { broken = true; Why = "capture: " + e.Message; return null; }
+            catch (Exception e)
+            {
+                if (result != null) result.Dispose();
+                broken = true;
+                Why = "capture: " + e.Message;
+                return null;
+            }
+        }
+
+        internal static bool HasVisiblePixels(Bitmap bitmap)
+        {
+            var data = bitmap.LockBits(new Rectangle(0, 0, bitmap.Width, bitmap.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppRgb);
+            try
+            {
+                var row = new byte[bitmap.Width * 4];
+                for (int y = 0; y < bitmap.Height; y++)
+                {
+                    Marshal.Copy(IntPtr.Add(data.Scan0, y * data.Stride), row, 0, row.Length);
+                    for (int x = 0; x < row.Length; x += 4)
+                    {
+                        // Ignore the padding byte and allow black-level noise.
+                        if (row[x] > 3 || row[x + 1] > 3 || row[x + 2] > 3) return true;
+                    }
+                }
+                return false;
+            }
+            finally { bitmap.UnlockBits(data); }
         }
 
         static bool OnImage(IntPtr hwnd, IntPtr srcdata, MAGIMAGEHEADER h, IntPtr destdata, MAGIMAGEHEADER dh, Native.RECT unclipped, Native.RECT clipped, IntPtr dirty)

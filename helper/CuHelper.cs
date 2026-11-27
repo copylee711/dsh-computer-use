@@ -1900,8 +1900,13 @@ namespace DshComputerUse
                 if (String.Join(",", el.GetRuntimeId()) == runtimeId) { target = el; break; }
                 if (el.Current.ControlType == ControlType.Window) break;
             }
-            if (target == null || target.Current.IsOffscreen || !target.Current.IsEnabled)
-                throw new Exception("The named target changed or is no longer actionable");
+            // A point that resolves to something else (another window's tree owns the
+            // hit, e.g. an overlay above the target) is not a changed target: report
+            // that no semantic action ran and let the host use its verified pointer
+            // click, which the card already lets through.
+            if (target == null || target.Current.IsOffscreen) return result;
+            if (!target.Current.IsEnabled)
+                throw new Exception("The named target is disabled");
             object pattern = null;
             if (action == "invoke" && !target.TryGetCurrentPattern(InvokePattern.Pattern, out pattern)) return result;
             if (action == "focus" && !target.Current.IsKeyboardFocusable) return result;
